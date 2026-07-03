@@ -1,0 +1,57 @@
+@using System.Text.Json
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.subtitle2" Class="mb-1">Envelope</MudText>
+        <MudPaper Class="pa-3 mb-4" Elevation="0" Outlined="true">
+            <pre class="ces-json">@PrettyEnvelope</pre>
+        </MudPaper>
+        <MudText Typo="Typo.subtitle2" Class="mb-1">Data</MudText>
+        <MudPaper Class="pa-3" Elevation="0" Outlined="true">
+            <pre class="ces-json">@PrettyData</pre>
+        </MudPaper>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Close">Close</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    private static readonly JsonSerializerOptions IndentOptions = new JsonSerializerOptions { WriteIndented = true };
+
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter]
+    public string EnvelopeJson { get; set; } = "null";
+
+    [Parameter]
+    public string DataJson { get; set; } = "null";
+
+    private string PrettyEnvelope => Pretty(EnvelopeJson);
+
+    private string PrettyData => Pretty(DataJson);
+
+    private void Close()
+    {
+        MudDialog.Close();
+    }
+
+    private static string Pretty(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return "null";
+        }
+
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            return JsonSerializer.Serialize(document.RootElement, IndentOptions);
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+    }
+}

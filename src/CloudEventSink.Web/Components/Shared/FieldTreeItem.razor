@@ -1,0 +1,61 @@
+@if (Node is not null)
+{
+    <MudTreeViewItem T="string" Value="@Label" Text="@Label" Expanded="true" Icon="@NodeIcon">
+        @foreach (FieldNode child in Node.Children)
+        {
+            <FieldTreeItem Node="child" />
+        }
+        @if (Node.Element is not null)
+        {
+            <FieldTreeItem Node="Node.Element" IsElement="true" />
+        }
+    </MudTreeViewItem>
+}
+
+@code {
+    [Parameter]
+    public FieldNode Node { get; set; } = default!;
+
+    [Parameter]
+    public bool IsElement { get; set; }
+
+    private string Label => BuildLabel();
+
+    private string NodeIcon
+    {
+        get
+        {
+            if (Node.Element is not null)
+            {
+                return Icons.Material.Filled.DataArray;
+            }
+
+            return Node.Children.Count > 0 ? Icons.Material.Filled.DataObject : Icons.Material.Filled.Label;
+        }
+    }
+
+    private string BuildLabel()
+    {
+        string name = ResolveName();
+        string kinds = string.Join(" | ", Node.Kinds);
+        string nullable = Node.Nullable ? " nullable" : string.Empty;
+        string presence = FormatPresence(Node.PresenceRatio);
+        return $"{name}: {kinds}{nullable} · {presence}";
+    }
+
+    private string ResolveName()
+    {
+        if (IsElement)
+        {
+            return "(item)";
+        }
+
+        return string.IsNullOrEmpty(Node.Name) ? "(root)" : Node.Name;
+    }
+
+    private static string FormatPresence(double ratio)
+    {
+        int percent = (int)Math.Round(ratio * 100.0, MidpointRounding.AwayFromZero);
+        return $"{percent}%";
+    }
+}

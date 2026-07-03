@@ -1,0 +1,48 @@
+@page "/login"
+@layout EmptyLayout
+
+<PageTitle>Sign in to CloudEventSink</PageTitle>
+
+<div class="ces-login-wrap">
+    <div class="ces-login-card">
+        <div class="ces-login-brand">
+            <span class="ces-login-dot"></span>
+            <span class="ces-login-title">CloudEventSink</span>
+        </div>
+        <h1 class="ces-login-heading">Sign in</h1>
+        <p class="ces-login-sub">Access the CloudEventSink administration.</p>
+
+        @if (ErrorMessage is not null)
+        {
+            <div class="ces-alert">@ErrorMessage</div>
+        }
+
+        <form method="post" action="/auth/login" data-enhance="false">
+            <input type="hidden" name="returnUrl" value="@ReturnUrl" />
+            <label class="ces-label" for="email">Email</label>
+            <input class="ces-input" id="email" name="email" type="email" autocomplete="username" required autofocus />
+            <label class="ces-label" for="password">Password</label>
+            <input class="ces-input" id="password" name="password" type="password" autocomplete="current-password" required />
+            <label class="ces-checkbox">
+                <input type="checkbox" name="rememberMe" value="true" />
+                <span>Remember me</span>
+            </label>
+            <button type="submit" class="ces-button">Sign in</button>
+        </form>
+    </div>
+</div>
+
+@code {
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    private string? ReturnUrl { get; set; }
+
+    [SupplyParameterFromQuery(Name = "error")]
+    private string? Error { get; set; }
+
+    private string? ErrorMessage => Error switch
+    {
+        "locked" => "This account is temporarily locked. Please try again later.",
+        "invalid" => "Invalid email or password.",
+        _ => null,
+    };
+}

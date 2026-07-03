@@ -1,0 +1,291 @@
+@page "/sources/{Id:guid}"
+@attribute [Authorize]
+@inject ISourceRepository SourceRepository
+@inject IEventRepository EventRepository
+@inject ISchemaRepository SchemaRepository
+@inject ISourceSecretService SecretService
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject IDialogService DialogService
+@inject ISnackbar Snackbar
+@inject NavigationManager Navigation
+@inject IJSRuntime Js
+
+<PageTitle>Source detail</PageTitle>
+
+@if (loading)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (source is null)
+{
+    <MudAlert Severity="Severity.Error">This source does not exist.</MudAlert>
+}
+else
+{
+    <div class="d-flex justify-space-between align-center mb-2">
+        <MudText Typo="Typo.h4">@source.Name</MudText>
+        <MudChip T="string" Color="Color.Default">/@source.Slug</MudChip>
+    </div>
+
+    <MudTabs Elevation="1" Rounded="true" ApplyEffectsToContainer="true" Class="mt-4">
+        <MudTabPanel Text="Events">
+            <div class="px-6 py-5">
+            <div class="d-flex gap-4 align-center mb-4">
+                <MudSelect T="string" Value="typeFilter" ValueChanged="OnFilterChangedAsync" Label="Event type" Clearable="true" Dense="true" Style="max-width:320px">
+                    <MudSelectItem T="string" Value="@AllTypes">All types</MudSelectItem>
+                    @foreach (string eventType in eventTypes)
+                    {
+                        <MudSelectItem T="string" Value="@eventType">@eventType</MudSelectItem>
+                    }
+                </MudSelect>
+            </div>
+
+            @if (feed is null)
+            {
+                <MudProgressCircular Indeterminate="true" />
+            }
+            else if (feed.Items.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info">No events received yet.</MudAlert>
+            }
+            else
+            {
+                <MudTable Items="feed.Items" Hover="true" Dense="true">
+                    <HeaderContent>
+                        <MudTh>Received (UTC)</MudTh>
+                        <MudTh>Type</MudTh>
+                        <MudTh>Subject</MudTh>
+                        <MudTh>Event id</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd DataLabel="Received">@FormatUtc(context.ReceivedAtUtc)</MudTd>
+                        <MudTd DataLabel="Type">@context.EventType</MudTd>
+                        <MudTd DataLabel="Subject">@context.Subject</MudTd>
+                        <MudTd DataLabel="Event id">
+                            <MudLink @onclick="() => OpenEventAsync(context.Id)" Style="cursor:pointer">@context.EventId</MudLink>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+
+                <div class="d-flex justify-space-between align-center mt-4">
+                    <MudText Typo="Typo.body2">@feed.TotalCount events</MudText>
+                    <div class="d-flex gap-2 align-center">
+                        <MudButton Disabled="@(currentPage <= 1)" OnClick="PreviousPageAsync">Previous</MudButton>
+                        <MudText Typo="Typo.body2">Page @currentPage of @TotalPages</MudText>
+                        <MudButton Disabled="@(currentPage >= TotalPages)" OnClick="NextPageAsync">Next</MudButton>
+                    </div>
+                </div>
+            }
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Detected model">
+            <div class="px-6 py-5">
+            @if (schemas.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info">No schema inferred yet.</MudAlert>
+            }
+            else
+            {
+                <div class="mb-4">
+                    <MudSelect T="string" Value="selectedType" ValueChanged="OnSchemaSelectedAsync" Label="Event type" Dense="true" Style="max-width:320px">
+                        @foreach (string eventType in eventTypes)
+                        {
+                            <MudSelectItem T="string" Value="@eventType">@eventType</MudSelectItem>
+                        }
+                    </MudSelect>
+                </div>
+
+                @if (schemaRoot is not null && selectedSchema is not null)
+                {
+                    <MudText Typo="Typo.body2" Class="mb-2 mud-text-secondary">
+                        @selectedSchema.SampleCount samples · first seen @FormatUtc(selectedSchema.FirstSeenUtc) · updated @FormatUtc(selectedSchema.LastUpdatedUtc)
+                    </MudText>
+                    <MudPaper Outlined="true" Class="pa-2">
+                        <MudTreeView T="string" Hover="true" ExpandOnClick="true">
+                            <FieldTreeItem Node="schemaRoot" />
+                        </MudTreeView>
+                    </MudPaper>
+                }
+            }
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Secret">
+            <div class="px-6 py-5" style="max-width:688px">
+                <MudTextField T="string"
+                              Value="@IngestUrl"
+                              ReadOnly="true"
+                              Label="Ingest URL"
+                              Variant="Variant.Outlined"
+                              Class="mb-4"
+                              Adornment="Adornment.End"
+                              AdornmentIcon="@Icons.Material.Filled.ContentCopy"
+                              OnAdornmentClick="CopyUrlAsync" />
+                <MudText Typo="Typo.body1" Class="mb-2">Authentication mode: <b>@source.AuthMode</b></MudText>
+                <MudText Typo="Typo.body2" Class="mb-4 mud-text-secondary">Current secret ends in …@source.SecretLastFour</MudText>
+                <MudButton Variant="Variant.Filled" Color="Color.Secondary" StartIcon="@Icons.Material.Filled.Autorenew" OnClick="RotateAsync">
+                    Rotate secret
+                </MudButton>
+            </div>
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    private const string AllTypes = "";
+    private const int PageSize = 50;
+
+    [Parameter]
+    public Guid Id { get; set; }
+
+    private bool loading = true;
+    private Source? source;
+    private List<InferredSchema> schemas = new List<InferredSchema>();
+    private IReadOnlyList<string> eventTypes = [];
+    private PagedResult<EventRecord>? feed;
+    private int currentPage = 1;
+    private string typeFilter = AllTypes;
+    private string? selectedType;
+    private InferredSchema? selectedSchema;
+    private FieldNode? schemaRoot;
+
+    private int TotalPages => feed is null || feed.TotalCount == 0
+        ? 1
+        : (int)Math.Ceiling(feed.TotalCount / (double)PageSize);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loading = true;
+        source = await SourceRepository.GetByIdAsync(Id, CancellationToken.None);
+        if (source is null)
+        {
+            loading = false;
+            return;
+        }
+
+        IReadOnlyList<InferredSchema> loadedSchemas = await SchemaRepository.ListBySourceAsync(Id, CancellationToken.None);
+        schemas = new List<InferredSchema>(loadedSchemas);
+        eventTypes = schemas.Select(schema => schema.EventType).ToList();
+        if (schemas.Count > 0 && selectedType is null)
+        {
+            OnSchemaSelectedAsync(schemas[0].EventType);
+        }
+
+        await LoadFeedAsync();
+        loading = false;
+    }
+
+    private async Task LoadFeedAsync()
+    {
+        string? filter = string.IsNullOrEmpty(typeFilter) ? null : typeFilter;
+        feed = await EventRepository.ListBySourceAsync(Id, filter, currentPage, PageSize, CancellationToken.None);
+    }
+
+    private async Task OnFilterChangedAsync(string value)
+    {
+        typeFilter = value ?? AllTypes;
+        currentPage = 1;
+        await LoadFeedAsync();
+    }
+
+    private async Task PreviousPageAsync()
+    {
+        if (currentPage > 1)
+        {
+            currentPage -= 1;
+            await LoadFeedAsync();
+        }
+    }
+
+    private async Task NextPageAsync()
+    {
+        if (currentPage < TotalPages)
+        {
+            currentPage += 1;
+            await LoadFeedAsync();
+        }
+    }
+
+    private void OnSchemaSelectedAsync(string value)
+    {
+        selectedType = value;
+        selectedSchema = schemas.FirstOrDefault(schema => string.Equals(schema.EventType, value, StringComparison.Ordinal));
+        schemaRoot = selectedSchema is null ? null : FieldNodeSerializer.Deserialize(selectedSchema.RootNodeJson);
+    }
+
+    private async Task OpenEventAsync(Guid eventId)
+    {
+        EventRecord? record = await EventRepository.GetByIdAsync(eventId, CancellationToken.None);
+        if (record is null)
+        {
+            Snackbar.Add("The event could not be loaded.", Severity.Error);
+            return;
+        }
+
+        DialogParameters<EventInspectorDialog> parameters = new DialogParameters<EventInspectorDialog>
+        {
+            { dialog => dialog.EnvelopeJson, record.Envelope },
+            { dialog => dialog.DataJson, record.Data },
+        };
+
+        DialogOptions options = new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true };
+        await DialogService.ShowAsync<EventInspectorDialog>($"Event {record.EventId}", parameters, options);
+    }
+
+    private async Task RotateAsync()
+    {
+        bool? confirmed = await DialogService.ShowMessageBoxAsync(
+            "Rotate secret",
+            "The current secret will stop working immediately. Continue?",
+            yesText: "Rotate",
+            cancelText: "Cancel");
+
+        if (confirmed != true || source is null)
+        {
+            return;
+        }
+
+        Source? tracked = await SourceRepository.GetByIdAsync(source.Id, CancellationToken.None);
+        if (tracked is null)
+        {
+            return;
+        }
+
+        IssuedSecret secret = SecretService.Issue(tracked.AuthMode);
+        tracked.SecretHash = secret.StoredValue;
+        tracked.SecretLastFour = secret.LastFour;
+        tracked.UpdatedAtUtc = Clock.UtcNow;
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        source = tracked;
+
+        DialogParameters<SecretDialog> parameters = new DialogParameters<SecretDialog>
+        {
+            { dialog => dialog.Secret, secret.PlaintextSecret },
+            { dialog => dialog.Slug, tracked.Slug },
+            { dialog => dialog.AuthMode, tracked.AuthMode },
+        };
+        DialogOptions options = new DialogOptions
+        {
+            CloseOnEscapeKey = false,
+            BackdropClick = false,
+            MaxWidth = MaxWidth.Medium,
+            FullWidth = true,
+        };
+        await DialogService.ShowAsync<SecretDialog>("Source connection", parameters, options);
+    }
+
+    private string IngestUrl => source is null ? string.Empty : $"{Navigation.BaseUri}ingest/{source.Slug}";
+
+    private async Task CopyUrlAsync()
+    {
+        await Js.InvokeVoidAsync("navigator.clipboard.writeText", IngestUrl);
+        Snackbar.Add("Ingest URL copied to clipboard.", Severity.Success);
+    }
+
+    private static string FormatUtc(DateTimeOffset value)
+    {
+        return value.UtcDateTime.ToString("u", System.Globalization.CultureInfo.InvariantCulture);
+    }
+}

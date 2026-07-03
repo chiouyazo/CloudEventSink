@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CloudEventSink.Core/CloudEventSink.Core.csproj" />
+    <Project Path="src/CloudEventSink.Infrastructure/CloudEventSink.Infrastructure.csproj" />
+    <Project Path="src/CloudEventSink.Web/CloudEventSink.Web.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CloudEventSink.Core.Tests/CloudEventSink.Core.Tests.csproj" />
+    <Project Path="tests/CloudEventSink.Web.Tests/CloudEventSink.Web.Tests.csproj" />
+  </Folder>
+</Solution>

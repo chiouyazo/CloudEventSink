@@ -1,0 +1,250 @@
+@page "/sources"
+@attribute [Authorize]
+@inject ISourceRepository SourceRepository
+@inject ISourceSecretService SecretService
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject IDialogService DialogService
+@inject ISnackbar Snackbar
+
+<PageTitle>Sources</PageTitle>
+
+<div class="d-flex justify-space-between align-center mb-4">
+    <MudText Typo="Typo.h4">Sources</MudText>
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Filled.Add" OnClick="CreateAsync">
+        New source
+    </MudButton>
+</div>
+
+@if (sources is null)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else
+{
+    <MudTable Items="sources" Hover="true" Dense="true" Breakpoint="Breakpoint.Sm">
+        <HeaderContent>
+            <MudTh>Name</MudTh>
+            <MudTh>Slug</MudTh>
+            <MudTh>Auth</MudTh>
+            <MudTh>Secret</MudTh>
+            <MudTh>Status</MudTh>
+            <MudTh Style="text-align:right">Actions</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="Name">
+                <MudLink Href="@($"/sources/{context.Id}")">@context.Name</MudLink>
+            </MudTd>
+            <MudTd DataLabel="Slug">/@context.Slug</MudTd>
+            <MudTd DataLabel="Auth">@context.AuthMode</MudTd>
+            <MudTd DataLabel="Secret">…@context.SecretLastFour</MudTd>
+            <MudTd DataLabel="Status">
+                @if (context.IsActive)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Success">Active</MudChip>
+                }
+                else
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Warning">Inactive</MudChip>
+                }
+            </MudTd>
+            <MudTd DataLabel="Actions" Style="text-align:right">
+                <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small" OnClick="() => EditAsync(context)" />
+                <MudIconButton Icon="@Icons.Material.Filled.Autorenew" Size="Size.Small" OnClick="() => RotateAsync(context)" aria-label="Rotate secret" />
+                <MudIconButton Icon="@Icons.Material.Filled.Delete" Color="Color.Error" Size="Size.Small" OnClick="() => DeleteAsync(context)" />
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private List<Source>? sources;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        IReadOnlyList<Source> loaded = await SourceRepository.ListAsync(CancellationToken.None);
+        sources = new List<Source>(loaded);
+    }
+
+    private async Task CreateAsync()
+    {
+        SourceFormModel model = new SourceFormModel { IsEdit = false };
+        DialogParameters<SourceFormDialog> parameters = new DialogParameters<SourceFormDialog>
+        {
+            { dialog => dialog.Model, model },
+        };
+
+        IDialogReference dialog = await DialogService.ShowAsync<SourceFormDialog>("New source", parameters);
+        DialogResult? result = await dialog.Result;
+        if (result is null || result.Canceled)
+        {
+            return;
+        }
+
+        if (await ExistsConflictAsync(model.Slug, model.Name, null))
+        {
+            Snackbar.Add("A source with this name or slug already exists.", Severity.Error);
+            return;
+        }
+
+        IssuedSecret secret = SecretService.Issue(model.AuthMode);
+        DateTimeOffset now = Clock.UtcNow;
+        Source source = new Source
+        {
+            Id = Guid.NewGuid(),
+            Name = model.Name.Trim(),
+            Slug = model.Slug.Trim(),
+            AuthMode = model.AuthMode,
+            SecretHash = secret.StoredValue,
+            SecretLastFour = secret.LastFour,
+            IpAllowlist = Normalize(model.IpAllowlist),
+            IsActive = model.IsActive,
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now,
+        };
+
+        SourceRepository.Add(source);
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        await ReloadAsync();
+        await ShowSecretAsync(secret.PlaintextSecret, source.Slug, source.AuthMode);
+    }
+
+    private async Task EditAsync(Source source)
+    {
+        SourceFormModel model = new SourceFormModel
+        {
+            Name = source.Name,
+            Slug = source.Slug,
+            AuthMode = source.AuthMode,
+            IpAllowlist = source.IpAllowlist,
+            IsActive = source.IsActive,
+            IsEdit = true,
+        };
+
+        DialogParameters<SourceFormDialog> parameters = new DialogParameters<SourceFormDialog>
+        {
+            { dialog => dialog.Model, model },
+        };
+
+        IDialogReference dialog = await DialogService.ShowAsync<SourceFormDialog>("Edit source", parameters);
+        DialogResult? result = await dialog.Result;
+        if (result is null || result.Canceled)
+        {
+            return;
+        }
+
+        if (await ExistsConflictAsync(model.Slug, model.Name, source.Id))
+        {
+            Snackbar.Add("A source with this name or slug already exists.", Severity.Error);
+            return;
+        }
+
+        Source? tracked = await SourceRepository.GetByIdAsync(source.Id, CancellationToken.None);
+        if (tracked is null)
+        {
+            Snackbar.Add("The source no longer exists.", Severity.Error);
+            await ReloadAsync();
+            return;
+        }
+
+        tracked.Name = model.Name.Trim();
+        tracked.Slug = model.Slug.Trim();
+        tracked.IpAllowlist = Normalize(model.IpAllowlist);
+        tracked.IsActive = model.IsActive;
+        tracked.UpdatedAtUtc = Clock.UtcNow;
+
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        await ReloadAsync();
+        Snackbar.Add("Source updated.", Severity.Success);
+    }
+
+    private async Task RotateAsync(Source source)
+    {
+        bool? confirmed = await DialogService.ShowMessageBoxAsync(
+            "Rotate secret",
+            "The current secret will stop working immediately. Continue?",
+            yesText: "Rotate",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        Source? tracked = await SourceRepository.GetByIdAsync(source.Id, CancellationToken.None);
+        if (tracked is null)
+        {
+            await ReloadAsync();
+            return;
+        }
+
+        IssuedSecret secret = SecretService.Issue(tracked.AuthMode);
+        tracked.SecretHash = secret.StoredValue;
+        tracked.SecretLastFour = secret.LastFour;
+        tracked.UpdatedAtUtc = Clock.UtcNow;
+
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        await ReloadAsync();
+        await ShowSecretAsync(secret.PlaintextSecret, tracked.Slug, tracked.AuthMode);
+    }
+
+    private async Task DeleteAsync(Source source)
+    {
+        bool? confirmed = await DialogService.ShowMessageBoxAsync(
+            "Delete source",
+            $"Delete '{source.Name}' and all of its events and schemas? This cannot be undone.",
+            yesText: "Delete",
+            cancelText: "Cancel");
+
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        Source? tracked = await SourceRepository.GetByIdAsync(source.Id, CancellationToken.None);
+        if (tracked is not null)
+        {
+            SourceRepository.Remove(tracked);
+            await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        }
+
+        await ReloadAsync();
+        Snackbar.Add("Source deleted.", Severity.Success);
+    }
+
+    private async Task<bool> ExistsConflictAsync(string slug, string name, Guid? excludingId)
+    {
+        bool slugTaken = await SourceRepository.SlugExistsAsync(slug.Trim(), excludingId, CancellationToken.None);
+        bool nameTaken = await SourceRepository.NameExistsAsync(name.Trim(), excludingId, CancellationToken.None);
+        return slugTaken || nameTaken;
+    }
+
+    private async Task ShowSecretAsync(string plaintext, string slug, SourceAuthMode authMode)
+    {
+        DialogParameters<SecretDialog> parameters = new DialogParameters<SecretDialog>
+        {
+            { dialog => dialog.Secret, plaintext },
+            { dialog => dialog.Slug, slug },
+            { dialog => dialog.AuthMode, authMode },
+        };
+
+        DialogOptions options = new DialogOptions
+        {
+            CloseOnEscapeKey = false,
+            BackdropClick = false,
+            MaxWidth = MaxWidth.Medium,
+            FullWidth = true,
+        };
+        await DialogService.ShowAsync<SecretDialog>("Source connection", parameters, options);
+    }
+
+    private static string? Normalize(string? allowlist)
+    {
+        return string.IsNullOrWhiteSpace(allowlist) ? null : allowlist.Trim();
+    }
+}

@@ -1,0 +1,76 @@
+<MudDialog>
+    <DialogContent>
+        <MudForm @ref="form">
+            <MudTextField @bind-Value="Model.Name"
+                          Label="Display name"
+                          Required="true"
+                          RequiredError="A name is required."
+                          MaxLength="200" />
+            <MudTextField @bind-Value="Model.Slug"
+                          Label="Slug"
+                          Required="true"
+                          RequiredError="A slug is required."
+                          HelperText="Lowercase letters, digits and hyphens. Part of the ingest URL."
+                          Validation="@(new Func<string, string?>(ValidateSlug))" />
+            <MudSelect T="SourceAuthMode"
+                       @bind-Value="Model.AuthMode"
+                       Label="Authentication mode"
+                       Disabled="Model.IsEdit"
+                       Class="mt-4">
+                <MudSelectItem Value="SourceAuthMode.Bearer">Bearer token</MudSelectItem>
+                <MudSelectItem Value="SourceAuthMode.Hmac">HMAC signature</MudSelectItem>
+            </MudSelect>
+            <MudTextField @bind-Value="Model.IpAllowlist"
+                          Label="IP allowlist"
+                          HelperText="Optional. Comma separated CIDR ranges or addresses. Empty allows all."
+                          Class="mt-4" />
+            <MudSwitch @bind-Value="Model.IsActive" Label="Active" Color="Color.Primary" Class="mt-4" />
+        </MudForm>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="SubmitAsync">@SubmitLabel</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter]
+    public SourceFormModel Model { get; set; } = new SourceFormModel();
+
+    private MudForm form = default!;
+
+    private string SubmitLabel => Model.IsEdit ? "Save" : "Create";
+
+    private async Task SubmitAsync()
+    {
+        await form.ValidateAsync();
+        if (form.IsValid)
+        {
+            MudDialog.Close(DialogResult.Ok(Model));
+        }
+    }
+
+    private void Cancel()
+    {
+        MudDialog.Cancel();
+    }
+
+    private static string? ValidateSlug(string slug)
+    {
+        if (string.IsNullOrWhiteSpace(slug))
+        {
+            return "A slug is required.";
+        }
+
+        return System.Text.RegularExpressions.Regex.IsMatch(
+            slug,
+            "^[a-z0-9-]{1,120}$",
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant,
+            TimeSpan.FromMilliseconds(200))
+            ? null
+            : "Only lowercase letters, digits and hyphens are allowed.";
+    }
+}

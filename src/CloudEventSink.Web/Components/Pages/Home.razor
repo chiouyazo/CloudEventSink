@@ -1,0 +1,87 @@
+@page "/"
+@attribute [Authorize]
+@inject ISourceRepository Sources
+@inject IEventRepository Events
+@inject NavigationManager Navigation
+
+<PageTitle>Dashboard</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Dashboard</MudText>
+
+@if (tiles is null)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (tiles.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">
+        No sources configured yet. Create one on the
+        <MudLink Href="/sources">Sources</MudLink> page.
+    </MudAlert>
+}
+else
+{
+    <MudGrid>
+        @foreach (DashboardTile tile in tiles)
+        {
+            <MudItem xs="12" sm="6" md="4">
+                <MudCard Outlined="true" Class="ces-tile" @onclick="() => OpenSource(tile.Source.Id)">
+                    <MudCardContent>
+                        <div class="d-flex justify-space-between align-center mb-2">
+                            <MudText Typo="Typo.h6">@tile.Source.Name</MudText>
+                            <MudChip T="string" Size="Size.Small" Color="@AuthColor(tile.Source.AuthMode)">
+                                @tile.Source.AuthMode
+                            </MudChip>
+                        </div>
+                        <MudText Typo="Typo.body2" Class="mud-text-secondary mb-4">/@tile.Source.Slug</MudText>
+                        <MudText Typo="Typo.h4">@tile.EventCount</MudText>
+                        <MudText Typo="Typo.caption" Class="mud-text-secondary">events received</MudText>
+                        <MudText Typo="Typo.body2" Class="mt-3">
+                            Last activity: @FormatActivity(tile.LastActivityUtc)
+                        </MudText>
+                        @if (!tile.Source.IsActive)
+                        {
+                            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Class="mt-2">Inactive</MudChip>
+                        }
+                    </MudCardContent>
+                </MudCard>
+            </MudItem>
+        }
+    </MudGrid>
+}
+
+@code {
+    private List<DashboardTile>? tiles;
+
+    protected override async Task OnInitializedAsync()
+    {
+        IReadOnlyList<Source> sources = await Sources.ListAsync(CancellationToken.None);
+        List<DashboardTile> loaded = new List<DashboardTile>(sources.Count);
+
+        foreach (Source source in sources)
+        {
+            long count = await Events.CountBySourceAsync(source.Id, CancellationToken.None);
+            DateTimeOffset? last = await Events.LatestReceivedAtAsync(source.Id, CancellationToken.None);
+            loaded.Add(new DashboardTile { Source = source, EventCount = count, LastActivityUtc = last });
+        }
+
+        tiles = loaded;
+    }
+
+    private void OpenSource(Guid id)
+    {
+        Navigation.NavigateTo($"/sources/{id}");
+    }
+
+    private static Color AuthColor(SourceAuthMode authMode)
+    {
+        return authMode == SourceAuthMode.Hmac ? Color.Secondary : Color.Primary;
+    }
+
+    private static string FormatActivity(DateTimeOffset? value)
+    {
+        return value is null
+            ? "never"
+            : value.Value.UtcDateTime.ToString("u", System.Globalization.CultureInfo.InvariantCulture);
+    }
+}

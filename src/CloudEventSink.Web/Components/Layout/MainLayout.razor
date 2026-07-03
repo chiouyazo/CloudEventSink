@@ -1,0 +1,61 @@
+@inherits LayoutComponentBase
+@using CloudEventSink.Web.Theme
+
+<MudThemeProvider Theme="AppTheme.Instance" IsDarkMode="false" />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<MudLayout>
+    <MudAppBar Elevation="0" Color="Color.Surface" Class="ces-appbar">
+        <AuthorizeView>
+            <Authorized>
+                <MudIconButton Icon="@Icons.Material.Outlined.Menu" Color="Color.Default" Edge="Edge.Start" OnClick="ToggleDrawer" />
+            </Authorized>
+        </AuthorizeView>
+        <MudIcon Icon="@Icons.Material.Filled.Sensors" Color="Color.Primary" Class="mr-2" />
+        <MudText Typo="Typo.h6" Style="font-weight:600">CloudEventSink</MudText>
+        <MudSpacer />
+        <AuthorizeView>
+            <Authorized>
+                <form method="post" action="/auth/logout" data-enhance="false" style="display:inline">
+                    <MudButton ButtonType="ButtonType.Submit" Variant="Variant.Text" Color="Color.Default" StartIcon="@Icons.Material.Outlined.Logout">
+                        Sign out
+                    </MudButton>
+                </form>
+            </Authorized>
+        </AuthorizeView>
+    </MudAppBar>
+
+    <AuthorizeView>
+        <Authorized>
+            <MudDrawer @bind-Open="drawerOpen" Elevation="0" ClipMode="DrawerClipMode.Always" Variant="DrawerVariant.Responsive" Class="ces-drawer">
+                <MudNavMenu Class="pa-2">
+                    <MudNavLink Href="/" Match="NavLinkMatch.All" Icon="@Icons.Material.Outlined.Dashboard">Dashboard</MudNavLink>
+                    <MudNavLink Href="/sources" Match="NavLinkMatch.Prefix" Icon="@Icons.Material.Outlined.Hub">Sources</MudNavLink>
+                </MudNavMenu>
+            </MudDrawer>
+        </Authorized>
+    </AuthorizeView>
+
+    <MudMainContent>
+        <MudContainer MaxWidth="MaxWidth.Large" Class="my-8">
+            @Body
+        </MudContainer>
+    </MudMainContent>
+</MudLayout>
+
+<div id="blazor-error-ui" data-nosnippet>
+    An unhandled error has occurred.
+    <a href="." class="reload">Reload</a>
+    <span class="dismiss">🗙</span>
+</div>
+
+@code {
+    private bool drawerOpen = true;
+
+    private void ToggleDrawer()
+    {
+        drawerOpen = !drawerOpen;
+    }
+}

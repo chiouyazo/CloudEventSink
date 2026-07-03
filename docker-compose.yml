@@ -1,0 +1,34 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: cloudeventsink
+      POSTGRES_USER: cloudeventsink
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-cloudeventsink}
+    volumes:
+      - cloudeventsink-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cloudeventsink -d cloudeventsink"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ConnectionStrings__Postgres: "Host=db;Port=5432;Database=cloudeventsink;Username=cloudeventsink;Password=${POSTGRES_PASSWORD:-cloudeventsink}"
+      Admin__Email: ${ADMIN_EMAIL:-admin@example.com}
+      Admin__Password: ${ADMIN_PASSWORD:-ChangeMe!2026#Secure}
+      RateLimit__IngestPerMinute: "100"
+      Ingest__MaxBodyBytes: "1048576"
+    ports:
+      - "8080:8080"
+
+volumes:
+  cloudeventsink-data:
