@@ -1,0 +1,155 @@
+@using CloudEventSink.Core.Projection
+
+<MudText Typo="Typo.body2" Class="mud-text-secondary mb-3">
+    Control how this event maps to relational tables. Rename tables/columns, change types, exclude fields, and decide per array whether it becomes its own table, a JSON column, or is dropped. Auto-detected fields are the starting point and new fields are merged in automatically.
+</MudText>
+
+@foreach (TableEditModel table in model.Tables)
+{
+    TableEditModel current = table;
+    <MudPaper Outlined="true" Class="pa-3 mb-3" Style="@Indent(current)">
+        <div class="d-flex flex-wrap align-center gap-3 mb-2">
+            <MudText Typo="Typo.subtitle1">
+                @(current.IsChild ? string.Join(" › ", current.Path) : "Main table")
+            </MudText>
+            @if (current.ScalarArray)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Default">scalar array</MudChip>
+            }
+            @if (current.IsChild)
+            {
+                <MudSelect T="ArrayMode" @bind-Value="current.Mode" Dense="true" Label="Mode" Style="min-width:170px">
+                    <MudSelectItem T="ArrayMode" Value="ArrayMode.OwnTable">Own table</MudSelectItem>
+                    <MudSelectItem T="ArrayMode" Value="ArrayMode.JsonColumn">JSON column</MudSelectItem>
+                    <MudSelectItem T="ArrayMode" Value="ArrayMode.Exclude">Exclude</MudSelectItem>
+                </MudSelect>
+            }
+            @if (!current.IsChild || current.Mode != ArrayMode.Exclude)
+            {
+                <MudTextField T="string" @bind-Value="current.Name" Label="@(current.Mode == ArrayMode.JsonColumn && current.IsChild ? "Column name" : "Table name")" Margin="Margin.Dense" Style="min-width:280px" />
+            }
+            @if (NeedsOwnTableParent(current))
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Warning">parent must be "Own table"</MudChip>
+            }
+        </div>
+
+        @if ((!current.IsChild || current.Mode == ArrayMode.OwnTable) && current.Columns.Count > 0)
+        {
+            <MudSimpleTable Dense="true" Hover="true" Bordered="false" Striped="true" Style="overflow-x:auto">
+                <thead>
+                    <tr>
+                        <th style="width:90px">Include</th>
+                        <th>Column</th>
+                        <th style="width:180px">Type</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (ColumnEditModel column in current.Columns)
+                    {
+                        ColumnEditModel col = column;
+                        <tr>
+                            <td>
+                                <MudCheckBox T="bool" @bind-Value="col.Included" Dense="true" Disabled="@(col.Role == ColumnRole.EventId)" />
+                            </td>
+                            <td>
+                                <MudTextField T="string" @bind-Value="col.Name" Margin="Margin.Dense" />
+                            </td>
+                            <td>
+                                @if (col.Role == ColumnRole.Scalar)
+                                {
+                                    <MudSelect T="string" @bind-Value="col.SqlType" Dense="true">
+                                        @foreach (string type in Types)
+                                        {
+                                            <MudSelectItem T="string" Value="@type">@type</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                }
+                                else
+                                {
+                                    <MudText Typo="Typo.caption" Class="mud-text-secondary">@RoleLabel(col.Role)</MudText>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        }
+    </MudPaper>
+}
+
+<div class="d-flex gap-2 mt-2">
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.Save" OnClick="SaveAsync" Disabled="Busy">Save &amp; regenerate</MudButton>
+    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.RestartAlt" OnClick="ResetAsync" Disabled="Busy">Reset to auto-detected</MudButton>
+</div>
+
+@code {
+    private static readonly string[] Types =
+    [
+        "text",
+        "numeric",
+        "boolean",
+        "uuid",
+        "timestamptz",
+        "date",
+        "jsonb",
+    ];
+
+    [Parameter]
+    public ProjectionSpec Spec { get; set; } = new ProjectionSpec();
+
+    [Parameter]
+    public bool Busy { get; set; }
+
+    [Parameter]
+    public EventCallback<ProjectionSpec> OnSave { get; set; }
+
+    [Parameter]
+    public EventCallback OnReset { get; set; }
+
+    private ProjectionEditModel model = new ProjectionEditModel();
+
+    protected override void OnParametersSet()
+    {
+        model = ProjectionEditModel.FromSpec(Spec);
+    }
+
+    private async Task SaveAsync()
+    {
+        await OnSave.InvokeAsync(model.ToSpec());
+    }
+
+    private async Task ResetAsync()
+    {
+        await OnReset.InvokeAsync();
+    }
+
+    private static string Indent(TableEditModel table)
+    {
+        int depth = table.Path.Count;
+        return depth <= 1 ? string.Empty : $"margin-left:{(depth - 1) * 24}px";
+    }
+
+    private bool NeedsOwnTableParent(TableEditModel table)
+    {
+        if (!table.IsChild || table.Mode != ArrayMode.OwnTable || table.ParentKey is null)
+        {
+            return false;
+        }
+
+        TableEditModel? parent = model.Tables.FirstOrDefault(candidate => string.Equals(candidate.Key, table.ParentKey, StringComparison.Ordinal));
+        return parent is not null && parent.IsChild && parent.Mode != ArrayMode.OwnTable;
+    }
+
+    private static string RoleLabel(ColumnRole role)
+    {
+        return role switch
+        {
+            ColumnRole.EventId => "event id (link)",
+            ColumnRole.ReceivedAt => "received at",
+            ColumnRole.EventTime => "event time",
+            ColumnRole.Ordinal => "row index (link)",
+            _ => "value",
+        };
+    }
+}

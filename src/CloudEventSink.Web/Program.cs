@@ -50,6 +50,9 @@ try
     app.MapSourceEndpoints();
     app.MapEventEndpoints();
     app.MapSchemaEndpoints();
+    app.MapProjectionEndpoints();
+    app.MapQueryEndpoints();
+    app.MapApiTokenEndpoints();
     app.MapAuthEndpoints();
 
     await DatabaseInitializer.InitializeAsync(app.Services, CancellationToken.None);

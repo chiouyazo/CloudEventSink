@@ -24,6 +24,20 @@
                           Label="IP allowlist"
                           HelperText="Optional. Comma separated CIDR ranges or addresses. Empty allows all."
                           Class="mt-4" />
+            <MudSelect T="IngestMode" @bind-Value="Model.Mode" Label="Duplicate handling" Class="mt-4">
+                <MudSelectItem Value="IngestMode.IgnoreDuplicateById">Ignore duplicates (by event id)</MudSelectItem>
+                <MudSelectItem Value="IngestMode.UpsertById">Update on same event id</MudSelectItem>
+                <MudSelectItem Value="IngestMode.UpsertByKey">Keep latest per key (upsert)</MudSelectItem>
+                <MudSelectItem Value="IngestMode.KeepOnChange">Keep history, new row only on change</MudSelectItem>
+                <MudSelectItem Value="IngestMode.KeepAll">Keep every delivery</MudSelectItem>
+            </MudSelect>
+            @if (Model.Mode is IngestMode.UpsertByKey or IngestMode.KeepOnChange)
+            {
+                <MudTextField @bind-Value="Model.DedupKeyPaths"
+                              Label="Key fields"
+                              HelperText="Comma-separated data JSON fields, e.g. machineId or feed.id. Upsert: same key replaces the row. Keep-on-change: a new row is stored only when the data for that key differs from the last one."
+                              Class="mt-4" />
+            }
             <MudSwitch @bind-Value="Model.IsActive" Label="Active" Color="Color.Primary" Class="mt-4" />
         </MudForm>
     </DialogContent>

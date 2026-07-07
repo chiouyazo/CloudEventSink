@@ -1,8 +1,11 @@
 @page "/sources/{Id:guid}"
 @attribute [Authorize]
+@using CloudEventSink.Core.Projection
+@using Npgsql
 @inject ISourceRepository SourceRepository
 @inject IEventRepository EventRepository
 @inject ISchemaRepository SchemaRepository
+@inject IProjectionService ProjectionService
 @inject ISourceSecretService SecretService
 @inject IUnitOfWork UnitOfWork
 @inject IClock Clock
@@ -39,6 +42,10 @@ else
                         <MudSelectItem T="string" Value="@eventType">@eventType</MudSelectItem>
                     }
                 </MudSelect>
+                <MudSpacer />
+                <MudButton Variant="Variant.Outlined" Color="Color.Error" StartIcon="@Icons.Material.Outlined.DeleteSweep" OnClick="PurgeAsync">
+                    Delete old data
+                </MudButton>
             </div>
 
             @if (feed is null)
@@ -112,6 +119,39 @@ else
             </div>
         </MudTabPanel>
 
+        <MudTabPanel Text="Projection">
+            <div class="px-6 py-5">
+            @if (schemas.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info">No schema inferred yet. Ingest some events first.</MudAlert>
+            }
+            else
+            {
+                <MudSelect T="string" Value="projectionType" ValueChanged="OnProjectionTypeChangedAsync" Label="Event type" Dense="true" Class="mb-4" Style="max-width:320px">
+                    @foreach (string eventType in eventTypes)
+                    {
+                        <MudSelectItem T="string" Value="@eventType">@eventType</MudSelectItem>
+                    }
+                </MudSelect>
+
+                @if (projectionError is not null)
+                {
+                    <MudAlert Severity="Severity.Error" Class="mb-4">@projectionError</MudAlert>
+                }
+
+                @if (projectionBusy)
+                {
+                    <MudProgressLinear Indeterminate="true" Class="mb-4" />
+                }
+
+                @if (spec is not null)
+                {
+                    <ProjectionEditor Spec="spec" Busy="projectionBusy" OnSave="SaveProjectionAsync" OnReset="ResetProjectionAsync" />
+                }
+            }
+            </div>
+        </MudTabPanel>
+
         <MudTabPanel Text="Secret">
             <div class="px-6 py-5" style="max-width:688px">
                 <MudTextField T="string"
@@ -150,6 +190,10 @@ else
     private string? selectedType;
     private InferredSchema? selectedSchema;
     private FieldNode? schemaRoot;
+    private string? projectionType;
+    private ProjectionSpec? spec;
+    private bool projectionBusy;
+    private string? projectionError;
 
     private int TotalPages => feed is null || feed.TotalCount == 0
         ? 1
@@ -173,8 +217,80 @@ else
             OnSchemaSelectedAsync(schemas[0].EventType);
         }
 
+        if (schemas.Count > 0 && projectionType is null)
+        {
+            projectionType = schemas[0].EventType;
+            await LoadSpecAsync();
+        }
+
         await LoadFeedAsync();
         loading = false;
+    }
+
+    private async Task OnProjectionTypeChangedAsync(string value)
+    {
+        projectionType = value;
+        await LoadSpecAsync();
+    }
+
+    private async Task LoadSpecAsync()
+    {
+        if (projectionType is null)
+        {
+            return;
+        }
+
+        spec = await ProjectionService.GetSpecAsync(Id, projectionType, CancellationToken.None);
+    }
+
+    private async Task SaveProjectionAsync(ProjectionSpec updated)
+    {
+        if (projectionType is null)
+        {
+            return;
+        }
+
+        projectionBusy = true;
+        projectionError = null;
+        try
+        {
+            await ProjectionService.SaveSpecAsync(Id, projectionType, updated, CancellationToken.None);
+            await LoadSpecAsync();
+            Snackbar.Add("Projection saved and views regenerated.", Severity.Success);
+        }
+        catch (PostgresException exception)
+        {
+            projectionError = "Regeneration failed: " + exception.MessageText;
+        }
+        finally
+        {
+            projectionBusy = false;
+        }
+    }
+
+    private async Task ResetProjectionAsync()
+    {
+        if (projectionType is null)
+        {
+            return;
+        }
+
+        projectionBusy = true;
+        projectionError = null;
+        try
+        {
+            await ProjectionService.ResetSpecAsync(Id, projectionType, CancellationToken.None);
+            await LoadSpecAsync();
+            Snackbar.Add("Reset to auto-detected.", Severity.Success);
+        }
+        catch (PostgresException exception)
+        {
+            projectionError = "Regeneration failed: " + exception.MessageText;
+        }
+        finally
+        {
+            projectionBusy = false;
+        }
     }
 
     private async Task LoadFeedAsync()
@@ -232,6 +348,32 @@ else
 
         DialogOptions options = new DialogOptions { MaxWidth = MaxWidth.Medium, FullWidth = true };
         await DialogService.ShowAsync<EventInspectorDialog>($"Event {record.EventId}", parameters, options);
+    }
+
+    private async Task PurgeAsync()
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        DialogParameters<PurgeEventsDialog> parameters = new DialogParameters<PurgeEventsDialog>
+        {
+            { dialog => dialog.SourceId, source.Id },
+            { dialog => dialog.SourceName, source.Name },
+        };
+        DialogOptions options = new DialogOptions { MaxWidth = MaxWidth.Small, FullWidth = true };
+        IDialogReference dialog = await DialogService.ShowAsync<PurgeEventsDialog>("Delete old data", parameters, options);
+        DialogResult? result = await dialog.Result;
+        if (result is null || result.Canceled)
+        {
+            return;
+        }
+
+        int deleted = result.Data is int count ? count : 0;
+        currentPage = 1;
+        await LoadFeedAsync();
+        Snackbar.Add($"Deleted {deleted} event(s).", Severity.Success);
     }
 
     private async Task RotateAsync()

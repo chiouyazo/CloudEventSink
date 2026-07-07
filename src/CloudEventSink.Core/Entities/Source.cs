@@ -20,6 +20,10 @@ public sealed class Source
 
     public bool IsActive { get; set; }
 
+    public IngestMode Mode { get; set; } = IngestMode.IgnoreDuplicateById;
+
+    public string? DedupKeyPaths { get; set; }
+
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public DateTimeOffset UpdatedAtUtc { get; set; }

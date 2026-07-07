@@ -1,0 +1,91 @@
+@using CloudEventSink.Core.Abstractions
+@inject IEventRepository EventRepository
+@inject IClock Clock
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.body2" Class="mud-text-secondary mb-3">
+            Permanently delete ingested events for <b>@SourceName</b> that are older than the chosen age.
+            Detected schemas and views are kept. This cannot be undone.
+        </MudText>
+
+        <MudNumericField T="int" @bind-Value="days" Label="Delete events older than (days)" Min="0" Variant="Variant.Outlined" HelperText="Use 0 to delete every event for this source." />
+
+        <MudButton Variant="Variant.Outlined" Class="mt-3" StartIcon="@Icons.Material.Outlined.Search" OnClick="PreviewAsync" Disabled="busy">
+            Preview
+        </MudButton>
+
+        @if (previewCount is not null)
+        {
+            <MudAlert Severity="@(previewCount == 0 ? Severity.Info : Severity.Warning)" Class="mt-3">
+                @previewCount event(s) received before @CutoffText will be deleted.
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Error" Variant="Variant.Filled" OnClick="DeleteAsync" Disabled="busy || previewCount is null or 0">
+            Delete
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter]
+    public Guid SourceId { get; set; }
+
+    [Parameter]
+    public string SourceName { get; set; } = string.Empty;
+
+    private int days = 90;
+    private long? previewCount;
+    private bool busy;
+
+    private DateTimeOffset Cutoff => Clock.UtcNow.AddDays(-Math.Max(0, days));
+
+    private string CutoffText =>
+        Cutoff.UtcDateTime.ToString("u", System.Globalization.CultureInfo.InvariantCulture);
+
+    private async Task PreviewAsync()
+    {
+        busy = true;
+        try
+        {
+            previewCount = await EventRepository.CountReceivedBeforeAsync(
+                SourceId,
+                Cutoff,
+                CancellationToken.None
+            );
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteAsync()
+    {
+        busy = true;
+        try
+        {
+            int deleted = await EventRepository.DeleteReceivedBeforeAsync(
+                SourceId,
+                Cutoff,
+                CancellationToken.None
+            );
+            MudDialog.Close(DialogResult.Ok(deleted));
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void Cancel()
+    {
+        MudDialog.Cancel();
+    }
+}

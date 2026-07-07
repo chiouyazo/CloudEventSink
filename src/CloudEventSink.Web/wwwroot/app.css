@@ -77,6 +77,17 @@ html, body {
     white-space: pre;
 }
 
+.ces-wide-popover {
+    min-width: max-content;
+    max-width: 640px;
+}
+
+.ces-wide-popover .mud-list-item-text,
+.ces-wide-popover .mud-list-item-text .mud-typography {
+    white-space: normal;
+    word-break: break-all;
+}
+
 .ces-label {
     display: block;
     font-size: 0.85rem;

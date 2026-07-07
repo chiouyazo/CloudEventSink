@@ -1,0 +1,261 @@
+@page "/dashboards/{Id:guid}"
+@attribute [Authorize]
+@using System.Text.Json
+@using System.Text.Json.Nodes
+@using CloudEventSink.Core.Entities
+@using CloudEventSink.Core.Projection
+@using CloudEventSink.Core.Query
+@using CloudEventSink.Core.Query.Sql
+@using Npgsql
+@inject IDashboardRepository DashboardsRepo
+@inject ISavedQueryRepository SavedQueries
+@inject ISchemaProjectionRepository Projections
+@inject IQueryModelCompiler Compiler
+@inject IQueryRunner Runner
+@inject IUnitOfWork UnitOfWork
+@inject IDialogService DialogService
+@inject NavigationManager Navigation
+@inject ISnackbar Snackbar
+@inject IJSRuntime Js
+
+<PageTitle>Dashboard</PageTitle>
+
+@if (loading)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (dashboard is null)
+{
+    <MudAlert Severity="Severity.Error">This dashboard does not exist.</MudAlert>
+}
+else
+{
+    <div class="d-flex justify-space-between align-center mb-4">
+        <MudText Typo="Typo.h4">@dashboard.Name</MudText>
+        <div class="d-flex gap-2">
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Link" OnClick="CopyLinkAsync">Copy link</MudButton>
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Refresh" OnClick="RunAllAsync">Refresh</MudButton>
+        </div>
+    </div>
+
+    <MudPaper Outlined="true" Class="pa-4 mb-4">
+        <MudText Typo="Typo.subtitle2" Class="mb-2">Add panel</MudText>
+        <div class="d-flex flex-wrap gap-2 align-center">
+            <MudTextField @bind-Value="addTitle" Label="Title" Margin="Margin.Dense" Style="min-width:180px" />
+            <MudSelect T="Guid?" @bind-Value="addSavedQueryId" Label="Saved query" Dense="true" Style="min-width:220px">
+                @foreach (SavedQuery query in savedQueries)
+                {
+                    <MudSelectItem T="Guid?" Value="query.Id">@query.Name</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSelect T="VisualizationKind" @bind-Value="addViz" Label="Visualization" Dense="true" Style="min-width:160px">
+                @foreach (VisualizationKind kind in VizKinds)
+                {
+                    <MudSelectItem T="VisualizationKind" Value="kind">@kind</MudSelectItem>
+                }
+            </MudSelect>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.Add" OnClick="AddPanelAsync" Disabled="addSavedQueryId is null || string.IsNullOrWhiteSpace(addTitle)">
+                Add
+            </MudButton>
+        </div>
+    </MudPaper>
+
+    @if (panels.Count == 0)
+    {
+        <MudAlert Severity="Severity.Info">No panels yet. Add one from a saved query.</MudAlert>
+    }
+    else
+    {
+        <MudGrid>
+            @foreach (DashboardPanel panel in panels)
+            {
+                <MudItem xs="12" md="6">
+                    <MudCard Outlined="true">
+                        <MudCardHeader>
+                            <CardHeaderContent>
+                                <MudText Typo="Typo.h6">@panel.Title</MudText>
+                                <MudText Typo="Typo.caption" Class="mud-text-secondary">@panel.Visualization</MudText>
+                            </CardHeaderContent>
+                            <CardHeaderActions>
+                                <MudIconButton Icon="@Icons.Material.Outlined.Delete" Color="Color.Error" Size="Size.Small" OnClick="() => RemovePanelAsync(panel)" />
+                            </CardHeaderActions>
+                        </MudCardHeader>
+                        <MudCardContent>
+                            @RenderPanel(panel)
+                        </MudCardContent>
+                    </MudCard>
+                </MudItem>
+            }
+        </MudGrid>
+    }
+}
+
+@code {
+    private static readonly VisualizationKind[] VizKinds =
+    [
+        VisualizationKind.Table,
+        VisualizationKind.Bar,
+        VisualizationKind.Line,
+        VisualizationKind.Pie,
+        VisualizationKind.Stat,
+    ];
+
+    [Parameter]
+    public Guid Id { get; set; }
+
+    private bool loading = true;
+    private Dashboard? dashboard;
+    private List<DashboardPanel> panels = new List<DashboardPanel>();
+    private List<SavedQuery> savedQueries = new List<SavedQuery>();
+    private readonly Dictionary<Guid, QueryResultSet> results = new Dictionary<Guid, QueryResultSet>();
+    private readonly Dictionary<Guid, string> errors = new Dictionary<Guid, string>();
+
+    private string addTitle = string.Empty;
+    private Guid? addSavedQueryId;
+    private VisualizationKind addViz = VisualizationKind.Table;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loading = true;
+        dashboard = await DashboardsRepo.GetByIdAsync(Id, CancellationToken.None);
+        if (dashboard is null)
+        {
+            loading = false;
+            return;
+        }
+
+        savedQueries = new List<SavedQuery>(await SavedQueries.ListAsync(CancellationToken.None));
+        await RunAllAsync();
+        loading = false;
+    }
+
+    private async Task CopyLinkAsync()
+    {
+        string url = Navigation.ToAbsoluteUri($"/dashboards/{Id}").ToString();
+        bool copied = await Js.InvokeAsync<bool>("cesCopy", url);
+        Snackbar.Add(copied ? "Link copied to clipboard" : url, copied ? Severity.Success : Severity.Info);
+    }
+
+    private async Task RunAllAsync()
+    {
+        panels = new List<DashboardPanel>(await DashboardsRepo.ListPanelsAsync(Id, CancellationToken.None));
+        results.Clear();
+        errors.Clear();
+        foreach (DashboardPanel panel in panels)
+        {
+            await RunPanelAsync(panel);
+        }
+    }
+
+    private async Task RunPanelAsync(DashboardPanel panel)
+    {
+        SavedQuery? query = await SavedQueries.GetByIdAsync(panel.SavedQueryId, CancellationToken.None);
+        if (query is null)
+        {
+            errors[panel.Id] = "The saved query was deleted.";
+            return;
+        }
+
+        try
+        {
+            results[panel.Id] = await ExecuteSavedAsync(query);
+        }
+        catch (QueryValidationException exception)
+        {
+            errors[panel.Id] = exception.Message;
+        }
+        catch (PostgresException exception)
+        {
+            errors[panel.Id] = "Query failed: " + exception.MessageText;
+        }
+    }
+
+    private async Task<QueryResultSet> ExecuteSavedAsync(SavedQuery query)
+    {
+        if (query.Mode == QueryExecutionMode.Sql)
+        {
+            return await Runner.ExecuteAsync(query.Sql ?? string.Empty, [], CancellationToken.None);
+        }
+
+        if (query.SourceId is null || string.IsNullOrWhiteSpace(query.ModelJson))
+        {
+            throw new QueryValidationException("This saved query is missing its source or model.");
+        }
+
+        QueryModel? model = JsonSerializer.Deserialize<QueryModel>(query.ModelJson)
+            ?? throw new QueryValidationException("The saved query model could not be read.");
+        IReadOnlyList<SchemaProjection> projections =
+            await Projections.ListBySourceAsync(query.SourceId.Value, CancellationToken.None);
+        ProjectionCatalog catalog = ProjectionCatalogFactory.Create(projections);
+        GeneratedSql generated = Compiler.Compile(model, catalog);
+        return await Runner.ExecuteAsync(generated.CommandText, generated.Parameters, CancellationToken.None);
+    }
+
+    private RenderFragment RenderPanel(DashboardPanel panel) => builder =>
+    {
+        if (errors.TryGetValue(panel.Id, out string? error))
+        {
+            builder.OpenComponent<MudAlert>(0);
+            builder.AddAttribute(1, "Severity", Severity.Error);
+            builder.AddAttribute(2, "ChildContent", (RenderFragment)(child => child.AddContent(0, error)));
+            builder.CloseComponent();
+            return;
+        }
+
+        if (!results.TryGetValue(panel.Id, out QueryResultSet? result))
+        {
+            return;
+        }
+
+        if (panel.Visualization is VisualizationKind.Table or VisualizationKind.Tree or VisualizationKind.Pivot)
+        {
+            builder.OpenComponent<ResultGrid>(0);
+            builder.AddAttribute(1, "Result", result);
+            builder.AddAttribute(2, "Groupable", true);
+            builder.AddAttribute(3, "Height", "320px");
+            builder.CloseComponent();
+        }
+        else
+        {
+            builder.OpenComponent<ResultChart>(10);
+            builder.AddAttribute(11, "Result", result);
+            builder.AddAttribute(12, "Kind", panel.Visualization);
+            builder.CloseComponent();
+        }
+    };
+
+    private async Task AddPanelAsync()
+    {
+        if (addSavedQueryId is null || string.IsNullOrWhiteSpace(addTitle))
+        {
+            return;
+        }
+
+        DashboardPanel panel = new DashboardPanel
+        {
+            Id = Guid.NewGuid(),
+            DashboardId = Id,
+            SavedQueryId = addSavedQueryId.Value,
+            Title = addTitle.Trim(),
+            Visualization = addViz,
+            Position = panels.Count,
+        };
+        DashboardsRepo.AddPanel(panel);
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        addTitle = string.Empty;
+        addSavedQueryId = null;
+        await RunAllAsync();
+    }
+
+    private async Task RemovePanelAsync(DashboardPanel panel)
+    {
+        DashboardPanel? tracked = await DashboardsRepo.GetPanelAsync(panel.Id, CancellationToken.None);
+        if (tracked is not null)
+        {
+            DashboardsRepo.RemovePanel(tracked);
+            await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        }
+
+        await RunAllAsync();
+    }
+}

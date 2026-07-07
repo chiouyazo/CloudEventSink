@@ -21,6 +21,18 @@ public sealed class AppDbContext
 
     public DbSet<InferredSchema> Schemas => Set<InferredSchema>();
 
+    public DbSet<SchemaProjection> SchemaProjections => Set<SchemaProjection>();
+
+    public DbSet<SavedQuery> SavedQueries => Set<SavedQuery>();
+
+    public DbSet<QueryFolder> QueryFolders => Set<QueryFolder>();
+
+    public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
+
+    public DbSet<Dashboard> Dashboards => Set<Dashboard>();
+
+    public DbSet<DashboardPanel> DashboardPanels => Set<DashboardPanel>();
+
     public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     protected override void OnModelCreating(ModelBuilder builder)

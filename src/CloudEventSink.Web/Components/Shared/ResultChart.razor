@@ -1,0 +1,78 @@
+@using System.Globalization
+@using System.Text.Json.Nodes
+@using CloudEventSink.Core.Query
+
+@if (Result.Columns.Count == 0 || Result.Rows.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">No data to chart.</MudAlert>
+}
+else if (Kind == VisualizationKind.Stat)
+{
+    <MudPaper Outlined="true" Class="pa-6 d-flex flex-column align-center">
+        <MudText Typo="Typo.caption" Class="mud-text-secondary">@valueColumnName</MudText>
+        <MudText Typo="Typo.h3">@total.ToString("0.###", CultureInfo.InvariantCulture)</MudText>
+    </MudPaper>
+}
+else
+{
+    <MudChart T="double" ChartType="@ChartTypeValue" ChartSeries="@series" ChartLabels="@labels" Width="100%" Height="360px" />
+}
+
+@code {
+    [Parameter]
+    public QueryResultSet Result { get; set; } = new QueryResultSet();
+
+    [Parameter]
+    public VisualizationKind Kind { get; set; } = VisualizationKind.Bar;
+
+    private string[] labels = [];
+    private double[] data = [];
+    private List<ChartSeries<double>> series = new List<ChartSeries<double>>();
+    private double total;
+    private string valueColumnName = "value";
+
+    private ChartType ChartTypeValue => Kind switch
+    {
+        VisualizationKind.Pie => ChartType.Pie,
+        VisualizationKind.Line or VisualizationKind.Area => ChartType.Line,
+        _ => ChartType.Bar,
+    };
+
+    protected override void OnParametersSet()
+    {
+        if (Result.Columns.Count == 0)
+        {
+            return;
+        }
+
+        int valueIndex = ResolveValueIndex();
+        valueColumnName = Result.Columns.Count > valueIndex ? Result.Columns[valueIndex].Name : "value";
+        labels = Result.Rows.Select(row => Cell(row, 0)).ToArray();
+        data = Result.Rows.Select(row => ParseNumber(Cell(row, valueIndex))).ToArray();
+        total = data.Sum();
+        series = [new ChartSeries<double> { Name = valueColumnName, Data = data }];
+    }
+
+    private int ResolveValueIndex()
+    {
+        for (int index = 1; index < Result.Columns.Count; index++)
+        {
+            if (Result.Rows.Any(row => double.TryParse(Cell(row, index), NumberStyles.Any, CultureInfo.InvariantCulture, out double _)))
+            {
+                return index;
+            }
+        }
+
+        return Result.Columns.Count > 1 ? 1 : 0;
+    }
+
+    private static string Cell(IReadOnlyList<JsonNode?> row, int index)
+    {
+        return index >= 0 && index < row.Count ? row[index]?.ToString() ?? string.Empty : string.Empty;
+    }
+
+    private static double ParseNumber(string value)
+    {
+        return double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsed) ? parsed : 0;
+    }
+}

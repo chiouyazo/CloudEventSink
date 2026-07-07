@@ -12,6 +12,10 @@ public sealed class EventRecord
 
     public required string EventId { get; set; }
 
+    public string? DedupKey { get; set; }
+
+    public string? GroupKey { get; set; }
+
     public string? EventSource { get; set; }
 
     public string? Subject { get; set; }

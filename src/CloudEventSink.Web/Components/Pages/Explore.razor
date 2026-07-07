@@ -1,0 +1,818 @@
+@page "/explore"
+@attribute [Authorize]
+@using System.Security.Claims
+@using System.Text.Json
+@using System.Text.Json.Nodes
+@using CloudEventSink.Core.Entities
+@using CloudEventSink.Core.Projection
+@using CloudEventSink.Core.Query
+@using CloudEventSink.Core.Query.Sql
+@using CloudEventSink.Web.Components.Explore
+@using Npgsql
+@inject ISourceRepository Sources
+@inject ISchemaProjectionRepository Projections
+@inject IProjectionService ProjectionService
+@inject IQueryModelCompiler Compiler
+@inject IQueryRunner Runner
+@inject ISavedQueryRepository SavedQueries
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject IDialogService DialogService
+@inject IJSRuntime Js
+@inject ISnackbar Snackbar
+
+<PageTitle>Explore</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Explore</MudText>
+<MudText Typo="Typo.body2" Class="mud-text-secondary mb-4">
+    Read-only. Build a query by clicking fields, or write your own SELECT.
+</MudText>
+
+<MudGrid>
+    <MudItem xs="12" md="4">
+        <MudSelect T="Guid?" Label="Source" Placeholder="Choose a source" Value="sourceId" ValueChanged="OnSourceChangedAsync" Dense="true" PopoverClass="ces-wide-popover">
+            @foreach (Source source in sources)
+            {
+                <MudSelectItem T="Guid?" Value="source.Id">@source.Name</MudSelectItem>
+            }
+        </MudSelect>
+    </MudItem>
+    <MudItem xs="12" md="8" Class="d-flex align-center">
+        @if (sourceId is not null)
+        {
+            <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.Autorenew" OnClick="RegenerateAsync" Disabled="busy">
+                Generate / refresh views
+            </MudButton>
+        }
+    </MudItem>
+</MudGrid>
+
+@if (catalog is not null && catalog.Views.Count == 0 && sourceId is not null)
+{
+    <MudAlert Severity="Severity.Info" Class="my-4">
+        No views yet for this source. Ingest some events, then click "Generate / refresh views".
+    </MudAlert>
+}
+
+@if (catalog is not null && catalog.Views.Count > 0)
+{
+    <MudTabs Elevation="0" Rounded="true" Border="true" Class="mt-4" ApplyEffectsToContainer="true" @bind-ActivePanelIndex="activeTab">
+        <MudTabPanel Text="Builder">
+            <div class="px-6 py-5">
+                <MudGrid>
+                    <MudItem xs="12" md="4">
+                        <MudSelect T="string" Label="View (table)" Value="baseView" ValueChanged="OnBaseViewChanged" Dense="true" PopoverClass="ces-wide-popover">
+                            @foreach (string view in catalog.Views.Keys)
+                            {
+                                <MudSelectItem T="string" Value="@view">@ViewLabel(view)</MudSelectItem>
+                            }
+                        </MudSelect>
+
+                        @if (baseView is not null)
+                        {
+                            <MudText Typo="Typo.subtitle2" Class="mt-4 mb-2">Fields (click to add)</MudText>
+                            <div class="d-flex flex-wrap gap-1">
+                                @foreach (string column in catalog.Views[baseView].Keys)
+                                {
+                                    string baseColumn = column;
+                                    <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" OnClick="() => AddColumn(baseView, baseColumn)">
+                                        @column
+                                    </MudChip>
+                                }
+                            </div>
+                            @foreach (string target in JoinTargets())
+                            {
+                                string targetView = target;
+                                <MudText Typo="Typo.caption" Class="mt-2 mud-text-secondary">@ViewLabel(targetView)</MudText>
+                                <div class="d-flex flex-wrap gap-1">
+                                    @foreach (string column in ColumnsOf(targetView))
+                                    {
+                                        string targetColumn = column;
+                                        <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Secondary" OnClick="() => AddColumn(targetView, targetColumn)">
+                                            @column
+                                        </MudChip>
+                                    }
+                                </div>
+                            }
+                        }
+                    </MudItem>
+
+                    <MudItem xs="12" md="8">
+                        <MudText Typo="Typo.subtitle2" Class="mb-2">Selected columns (empty = all)</MudText>
+                        <div class="d-flex flex-wrap gap-2 mb-4">
+                            @for (int i = 0; i < selectedColumns.Count; i++)
+                            {
+                                int index = i;
+                                ColumnRef column = selectedColumns[index];
+                                <div class="d-inline-flex align-center" style="border:1px solid var(--mud-palette-lines-default);border-radius:16px;padding-left:4px">
+                                    <MudIconButton Icon="@Icons.Material.Outlined.ChevronLeft" Size="Size.Small" Disabled="@(index == 0)" OnClick="() => MoveColumn(index, -1)" aria-label="Move left" />
+                                    <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text" OnClose="() => RemoveColumn(column)">
+                                        @column.Column
+                                    </MudChip>
+                                    <MudIconButton Icon="@Icons.Material.Outlined.ChevronRight" Size="Size.Small" Disabled="@(index == selectedColumns.Count - 1)" OnClick="() => MoveColumn(index, 1)" aria-label="Move right" />
+                                </div>
+                            }
+                        </div>
+
+                        <div class="d-flex justify-space-between align-center mb-2">
+                            <MudText Typo="Typo.subtitle2">Joins</MudText>
+                            <MudButton Size="Size.Small" StartIcon="@Icons.Material.Outlined.Add" OnClick="AddJoin" Disabled="baseView is null || catalog.Views.Count < 2">Add join</MudButton>
+                        </div>
+                        @foreach (ExploreJoinRow join in joins)
+                        {
+                            ExploreJoinRow row = join;
+                            <MudPaper Outlined="true" Class="pa-2 mb-2">
+                                <div class="d-flex flex-wrap gap-2 align-center">
+                                    <MudSelect T="JoinType" @bind-Value="row.Type" Dense="true" Label="Type" Style="min-width:110px">
+                                        <MudSelectItem T="JoinType" Value="JoinType.Left">LEFT</MudSelectItem>
+                                        <MudSelectItem T="JoinType" Value="JoinType.Inner">INNER</MudSelectItem>
+                                    </MudSelect>
+                                    <MudSelect T="string" Value="row.TargetView" ValueChanged="@(value => OnJoinTargetChanged(row, value))" Dense="true" Label="Table" Style="min-width:220px" PopoverClass="ces-wide-popover">
+                                        @foreach (string view in OtherViews())
+                                        {
+                                            <MudSelectItem T="string" Value="@view">@ViewLabel(view)</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                    <MudText Typo="Typo.caption">on</MudText>
+                                    <MudSelect T="string" Value="row.LeftView" ValueChanged="@(value => OnJoinLeftViewChanged(row, value))" Dense="true" Label="Left table" Style="min-width:200px" PopoverClass="ces-wide-popover">
+                                        @foreach (string view in LeftViewOptions(row))
+                                        {
+                                            <MudSelectItem T="string" Value="@view">@ViewLabel(view)</MudSelectItem>
+                                        }
+                                    </MudSelect>
+                                    <MudSpacer />
+                                    <MudIconButton Icon="@Icons.Material.Outlined.Delete" Size="Size.Small" OnClick="() => joins.Remove(row)" />
+                                </div>
+                                @foreach (ExploreJoinKey key in row.Keys)
+                                {
+                                    ExploreJoinKey pair = key;
+                                    <div class="d-flex flex-wrap gap-2 align-center mt-1" style="padding-left:16px">
+                                        <MudSelect T="string" @bind-Value="pair.LeftColumn" Dense="true" Label="Left column" Style="min-width:170px" PopoverClass="ces-wide-popover">
+                                            @foreach (string column in ColumnsOf(row.LeftView))
+                                            {
+                                                <MudSelectItem T="string" Value="@column">@column</MudSelectItem>
+                                            }
+                                        </MudSelect>
+                                        <MudText Typo="Typo.caption">=</MudText>
+                                        <MudSelect T="string" @bind-Value="pair.RightColumn" Dense="true" Label="Right column" Style="min-width:170px" PopoverClass="ces-wide-popover">
+                                            @foreach (string column in ColumnsOf(row.TargetView))
+                                            {
+                                                <MudSelectItem T="string" Value="@column">@column</MudSelectItem>
+                                            }
+                                        </MudSelect>
+                                        <MudIconButton Icon="@Icons.Material.Outlined.Close" Size="Size.Small" Disabled="@(row.Keys.Count <= 1)" OnClick="() => row.Keys.Remove(pair)" />
+                                    </div>
+                                }
+                                <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Add" OnClick="() => AddJoinKey(row)">Add condition</MudButton>
+                            </MudPaper>
+                        }
+
+                        <MudText Typo="Typo.subtitle2" Class="mb-2 mt-3">Latest per key</MudText>
+                        <div class="d-flex flex-wrap gap-2 align-center mb-2">
+                            <MudSelect T="ColumnRef" MultiSelection="true" SelectedValues="distinctOn" SelectedValuesChanged="OnDistinctChanged" ToStringFunc="FilterFieldLabel" Dense="true" Label="Key column(s)" Style="min-width:240px" PopoverClass="ces-wide-popover">
+                                @foreach (ColumnRef option in BaseColumns())
+                                {
+                                    <MudSelectItem T="ColumnRef" Value="option">@FilterFieldLabel(option)</MudSelectItem>
+                                }
+                            </MudSelect>
+                            @if (distinctOn.Count > 0)
+                            {
+                                <MudText Typo="Typo.caption">newest by</MudText>
+                                <MudSelect T="ColumnRef" Value="latestBy" ValueChanged="@(value => latestBy = value)" ToStringFunc="FilterFieldLabel" Dense="true" Label="Column (desc)" Style="min-width:200px" PopoverClass="ces-wide-popover">
+                                    @foreach (ColumnRef option in BaseColumns())
+                                    {
+                                        <MudSelectItem T="ColumnRef" Value="option">@FilterFieldLabel(option)</MudSelectItem>
+                                    }
+                                </MudSelect>
+                                <MudButton Size="Size.Small" Variant="Variant.Text" OnClick="ClearDistinct">Clear</MudButton>
+                            }
+                        </div>
+
+                        <div class="d-flex justify-space-between align-center mb-2 mt-3">
+                            <MudText Typo="Typo.subtitle2">Filters</MudText>
+                            <MudButton Size="Size.Small" StartIcon="@Icons.Material.Outlined.Add" OnClick="AddFilter" Disabled="baseView is null">Add filter</MudButton>
+                        </div>
+                        @foreach (ExploreFilterRow filter in filters)
+                        {
+                            <div class="d-flex gap-2 align-center mb-2">
+                                <MudSelect T="ColumnRef"
+                                           Value="@(new ColumnRef { View = filter.View, Column = filter.Column })"
+                                           ValueChanged="@(column => OnFilterFieldChanged(filter, column))"
+                                           ToStringFunc="FilterFieldLabel"
+                                           Dense="true" Label="Field" Style="min-width:200px" PopoverClass="ces-wide-popover">
+                                    @foreach (ColumnRef option in AllFilterColumns())
+                                    {
+                                        <MudSelectItem T="ColumnRef" Value="option">@FilterFieldLabel(option)</MudSelectItem>
+                                    }
+                                </MudSelect>
+                                <MudSelect T="ConditionOperator" @bind-Value="filter.Operator" Dense="true" Label="Op" Style="min-width:120px">
+                                    @foreach (ConditionOperator op in FilterOperators)
+                                    {
+                                        <MudSelectItem T="ConditionOperator" Value="op">@op</MudSelectItem>
+                                    }
+                                </MudSelect>
+                                <MudTextField T="string" @bind-Value="filter.Value" Margin="Margin.Dense" Label="Value" Disabled="@IsValuelessOperator(filter.Operator)" />
+                                <MudIconButton Icon="@Icons.Material.Outlined.Delete" Size="Size.Small" OnClick="() => filters.Remove(filter)" />
+                            </div>
+                        }
+
+                        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.PlayArrow" OnClick="RunVisualAsync" Disabled="busy || baseView is null" Class="mt-2">
+                            Run
+                        </MudButton>
+                    </MudItem>
+                </MudGrid>
+            </div>
+        </MudTabPanel>
+
+        <MudTabPanel Text="SQL">
+            <div class="px-6 py-5">
+                <MudTextField T="string" @bind-Value="rawSql" Label="Read-only SELECT" Lines="6" Variant="Variant.Outlined" Class="ces-code" />
+                <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.PlayArrow" OnClick="RunSqlAsync" Disabled="busy" Class="mt-2">
+                    Run
+                </MudButton>
+            </div>
+        </MudTabPanel>
+    </MudTabs>
+
+    <div class="d-flex gap-2 my-3">
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.Save" OnClick="SaveAsync" Disabled="busy">
+            Save query
+        </MudButton>
+        @if (result is not null)
+        {
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Download" OnClick="ExportCsvAsync">CSV</MudButton>
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Download" OnClick="ExportJsonAsync">JSON</MudButton>
+        }
+    </div>
+}
+
+@if (error is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="my-4">@error</MudAlert>
+}
+
+@if (busy)
+{
+    <MudProgressLinear Indeterminate="true" Class="my-4" />
+}
+
+@if (result is not null)
+{
+    @if (result.Truncated)
+    {
+        <MudAlert Severity="Severity.Warning" Class="my-4">Showing the first @QueryLimits.MaxRows rows (result truncated).</MudAlert>
+    }
+    <MudText Typo="Typo.body2" Class="my-2">@result.Rows.Count rows · add columns to "Group by" for nested grouping; click a header to sort.</MudText>
+    <ResultGrid Result="result" Groupable="true" Grouping="grouping" GroupingChanged="OnGroupingChanged" />
+}
+
+@code {
+    private static readonly ConditionOperator[] FilterOperators =
+    [
+        ConditionOperator.Eq,
+        ConditionOperator.Neq,
+        ConditionOperator.Gt,
+        ConditionOperator.Lt,
+        ConditionOperator.Gte,
+        ConditionOperator.Lte,
+        ConditionOperator.Contains,
+        ConditionOperator.IsNull,
+        ConditionOperator.IsNotNull,
+    ];
+
+    private List<Source> sources = new List<Source>();
+    private Guid? sourceId;
+    private ProjectionCatalog? catalog;
+    private string? baseView;
+    private Dictionary<string, string> viewLabels = new Dictionary<string, string>(StringComparer.Ordinal);
+    private List<ExploreJoinRow> joins = new List<ExploreJoinRow>();
+    private List<ColumnRef> distinctOn = new List<ColumnRef>();
+    private ColumnRef? latestBy;
+    private List<ColumnRef> selectedColumns = new List<ColumnRef>();
+    private List<ExploreFilterRow> filters = new List<ExploreFilterRow>();
+    private QueryResultSet? result;
+    private List<string> grouping = new List<string>();
+    private string rawSql = string.Empty;
+    private string? error;
+    private bool busy;
+    private int activeTab;
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthState { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        IReadOnlyList<Source> loaded = await Sources.ListAsync(CancellationToken.None);
+        sources = new List<Source>(loaded);
+    }
+
+    private async Task OnSourceChangedAsync(Guid? value)
+    {
+        sourceId = value;
+        baseView = null;
+        joins = new List<ExploreJoinRow>();
+        distinctOn = new List<ColumnRef>();
+        latestBy = null;
+        selectedColumns = new List<ColumnRef>();
+        filters = new List<ExploreFilterRow>();
+        result = null;
+        error = null;
+        if (sourceId is not null)
+        {
+            await LoadCatalogAsync();
+        }
+    }
+
+    private async Task LoadCatalogAsync()
+    {
+        IReadOnlyList<Core.Entities.SchemaProjection> projections =
+            await Projections.ListBySourceAsync(sourceId!.Value, CancellationToken.None);
+        catalog = ProjectionCatalogFactory.Create(projections);
+        viewLabels = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (Core.Entities.SchemaProjection projection in projections)
+        {
+            viewLabels[projection.MainViewName] = projection.EventType;
+            foreach (ProjectedView child in ProjectionSerializer.DeserializeViews(projection.ChildViewsJson))
+            {
+                viewLabels[child.Name] = string.Join(" › ", child.ArrayPath);
+            }
+        }
+
+        baseView = catalog.Views.Keys.FirstOrDefault();
+    }
+
+    private string ViewLabel(string view)
+    {
+        return viewLabels.TryGetValue(view, out string? label) && !string.IsNullOrEmpty(label) ? label : view;
+    }
+
+    private async Task RegenerateAsync()
+    {
+        if (sourceId is null)
+        {
+            return;
+        }
+
+        busy = true;
+        error = null;
+        try
+        {
+            int count = await ProjectionService.RegenerateAsync(sourceId.Value, CancellationToken.None);
+            await LoadCatalogAsync();
+            Snackbar.Add($"Generated {count} view set(s).", Severity.Success);
+        }
+        catch (PostgresException exception)
+        {
+            error = "View generation failed: " + exception.MessageText;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void OnBaseViewChanged(string value)
+    {
+        baseView = value;
+        joins = new List<ExploreJoinRow>();
+        distinctOn = new List<ColumnRef>();
+        latestBy = null;
+        selectedColumns = new List<ColumnRef>();
+        filters = new List<ExploreFilterRow>();
+    }
+
+    private List<string> OtherViews()
+    {
+        if (catalog is null || baseView is null)
+        {
+            return new List<string>();
+        }
+
+        return catalog.Views.Keys.Where(view => !string.Equals(view, baseView, StringComparison.Ordinal)).ToList();
+    }
+
+    private List<string> LeftViewOptions(ExploreJoinRow row)
+    {
+        List<string> options = new List<string>();
+        if (baseView is not null)
+        {
+            options.Add(baseView);
+        }
+
+        options.AddRange(joins
+            .Where(other => !ReferenceEquals(other, row) && !string.IsNullOrEmpty(other.TargetView))
+            .Select(other => other.TargetView));
+        return options;
+    }
+
+    private List<string> JoinTargets()
+    {
+        return joins
+            .Select(join => join.TargetView)
+            .Where(view => !string.IsNullOrEmpty(view) && catalog is not null && catalog.Views.ContainsKey(view))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+    }
+
+    private IReadOnlyList<string> ColumnsOf(string? view)
+    {
+        if (view is null || catalog is null || !catalog.Views.TryGetValue(view, out IReadOnlyDictionary<string, string>? columns))
+        {
+            return [];
+        }
+
+        return columns.Keys.ToList();
+    }
+
+    private void AddJoin()
+    {
+        if (baseView is null || catalog is null)
+        {
+            return;
+        }
+
+        ExploreJoinRow row = new ExploreJoinRow
+        {
+            Type = JoinType.Left,
+            TargetView = OtherViews().FirstOrDefault() ?? string.Empty,
+            LeftView = baseView,
+        };
+        AutoKeys(row);
+        joins.Add(row);
+    }
+
+    private void OnJoinTargetChanged(ExploreJoinRow row, string value)
+    {
+        row.TargetView = value;
+        AutoKeys(row);
+    }
+
+    private void OnJoinLeftViewChanged(ExploreJoinRow row, string value)
+    {
+        row.LeftView = value;
+        AutoKeys(row);
+    }
+
+    private void AutoKeys(ExploreJoinRow row)
+    {
+        row.Keys.Clear();
+        foreach (string column in SharedKeyColumns(row.LeftView, row.TargetView))
+        {
+            row.Keys.Add(new ExploreJoinKey { LeftColumn = column, RightColumn = column });
+        }
+
+        if (row.Keys.Count == 0)
+        {
+            row.Keys.Add(new ExploreJoinKey { LeftColumn = DefaultKey(row.LeftView), RightColumn = DefaultKey(row.TargetView) });
+        }
+    }
+
+    private List<string> SharedKeyColumns(string? left, string? target)
+    {
+        IReadOnlyList<string> leftColumns = ColumnsOf(left);
+        IReadOnlyList<string> targetColumns = ColumnsOf(target);
+        return leftColumns
+            .Where(column => targetColumns.Contains(column)
+                && (string.Equals(column, "event_id", StringComparison.Ordinal) || column.EndsWith("_index", StringComparison.Ordinal)))
+            .ToList();
+    }
+
+    private void AddJoinKey(ExploreJoinRow row)
+    {
+        row.Keys.Add(new ExploreJoinKey { LeftColumn = DefaultKey(row.LeftView), RightColumn = DefaultKey(row.TargetView) });
+    }
+
+    private string DefaultKey(string? view)
+    {
+        IReadOnlyList<string> columns = ColumnsOf(view);
+        if (columns.Contains("event_id"))
+        {
+            return "event_id";
+        }
+
+        return columns.Count > 0 ? columns[0] : string.Empty;
+    }
+
+    private void AddColumn(string view, string column)
+    {
+        if (selectedColumns.Any(existing =>
+            string.Equals(existing.View, view, StringComparison.Ordinal)
+            && string.Equals(existing.Column, column, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        selectedColumns.Add(new ColumnRef { View = view, Column = column });
+    }
+
+    private void RemoveColumn(ColumnRef column)
+    {
+        selectedColumns.Remove(column);
+    }
+
+    private List<ColumnRef> BaseColumns()
+    {
+        List<ColumnRef> columns = new List<ColumnRef>();
+        if (catalog is null || baseView is null)
+        {
+            return columns;
+        }
+
+        foreach (string column in catalog.Views[baseView].Keys)
+        {
+            columns.Add(new ColumnRef { View = baseView, Column = column });
+        }
+
+        return columns;
+    }
+
+    private void OnGroupingChanged(IReadOnlyList<string> value)
+    {
+        grouping = value.ToList();
+    }
+
+    private void OnDistinctChanged(IEnumerable<ColumnRef> values)
+    {
+        distinctOn = values.ToList();
+        if (distinctOn.Count == 0)
+        {
+            latestBy = null;
+        }
+        else if (latestBy is null)
+        {
+            latestBy = DefaultLatestBy();
+        }
+    }
+
+    private ColumnRef? DefaultLatestBy()
+    {
+        if (baseView is null || catalog is null || !catalog.Views[baseView].ContainsKey("received_at"))
+        {
+            return null;
+        }
+
+        return new ColumnRef { View = baseView, Column = "received_at" };
+    }
+
+    private void ClearDistinct()
+    {
+        distinctOn = new List<ColumnRef>();
+        latestBy = null;
+    }
+
+    private void MoveColumn(int index, int delta)
+    {
+        int target = index + delta;
+        if (target < 0 || target >= selectedColumns.Count)
+        {
+            return;
+        }
+
+        (selectedColumns[index], selectedColumns[target]) = (selectedColumns[target], selectedColumns[index]);
+    }
+
+    private List<ColumnRef> AllFilterColumns()
+    {
+        List<ColumnRef> columns = new List<ColumnRef>();
+        if (catalog is null || baseView is null)
+        {
+            return columns;
+        }
+
+        foreach (string column in catalog.Views[baseView].Keys)
+        {
+            columns.Add(new ColumnRef { View = baseView, Column = column });
+        }
+
+        foreach (string view in JoinTargets())
+        {
+            foreach (string column in ColumnsOf(view))
+            {
+                columns.Add(new ColumnRef { View = view, Column = column });
+            }
+        }
+
+        return columns;
+    }
+
+    private string FilterFieldLabel(ColumnRef? column)
+    {
+        if (column is null)
+        {
+            return string.Empty;
+        }
+
+        return string.Equals(column.View, baseView, StringComparison.Ordinal)
+            ? column.Column
+            : $"{column.Column} · {ViewLabel(column.View)}";
+    }
+
+    private static void OnFilterFieldChanged(ExploreFilterRow filter, ColumnRef? column)
+    {
+        if (column is not null)
+        {
+            filter.View = column.View;
+            filter.Column = column.Column;
+        }
+    }
+
+    private void AddFilter()
+    {
+        if (baseView is null)
+        {
+            return;
+        }
+
+        string firstColumn = catalog!.Views[baseView].Keys.FirstOrDefault() ?? string.Empty;
+        filters.Add(new ExploreFilterRow { View = baseView, Column = firstColumn });
+    }
+
+    private async Task RunVisualAsync()
+    {
+        if (baseView is null || catalog is null)
+        {
+            return;
+        }
+
+        QueryModel model = BuildModel();
+        await ExecuteAsync(() =>
+        {
+            GeneratedSql generated = Compiler.Compile(model, catalog);
+            return Runner.ExecuteAsync(generated.CommandText, generated.Parameters, CancellationToken.None);
+        });
+    }
+
+    private List<SelectColumn> BuildSelectColumns()
+    {
+        List<SelectColumn> columns = new List<SelectColumn>();
+        HashSet<string> used = new HashSet<string>(StringComparer.Ordinal);
+        foreach (ColumnRef column in selectedColumns)
+        {
+            string alias = column.Column;
+            int suffix = 2;
+            while (!used.Add(alias))
+            {
+                alias = $"{column.Column}_{suffix.ToString(System.Globalization.CultureInfo.InvariantCulture)}";
+                suffix++;
+            }
+
+            columns.Add(new SelectColumn
+            {
+                View = column.View,
+                Column = column.Column,
+                Alias = string.Equals(alias, column.Column, StringComparison.Ordinal) ? null : alias,
+            });
+        }
+
+        return columns;
+    }
+
+    private QueryModel BuildModel()
+    {
+        return new QueryModel
+        {
+            BaseView = baseView!,
+            Columns = BuildSelectColumns(),
+            DistinctOn = distinctOn.ToList(),
+            LatestBy = latestBy,
+            Joins = joins
+                .Where(join => !string.IsNullOrEmpty(join.TargetView) && !string.IsNullOrEmpty(join.LeftView) && join.Keys.Count > 0)
+                .Select(join => new QueryJoin
+                {
+                    Type = join.Type,
+                    TargetView = join.TargetView,
+                    LeftView = join.LeftView,
+                    LeftColumn = join.Keys[0].LeftColumn,
+                    RightView = join.TargetView,
+                    RightColumn = join.Keys[0].RightColumn,
+                    Keys = join.Keys
+                        .Where(key => !string.IsNullOrEmpty(key.LeftColumn) && !string.IsNullOrEmpty(key.RightColumn))
+                        .Select(key => new JoinKeyPair { LeftColumn = key.LeftColumn, RightColumn = key.RightColumn })
+                        .ToList(),
+                }).ToList(),
+            Filters = filters.Count > 0
+                ? new FilterGroup { Conditions = filters.Select(BuildCondition).ToList() }
+                : null,
+            Limit = QueryLimits.MaxRows,
+        };
+    }
+
+    private async Task SaveAsync()
+    {
+        SaveQueryInput input = new SaveQueryInput();
+        DialogParameters<SaveQueryDialog> parameters = new DialogParameters<SaveQueryDialog>
+        {
+            { dialog => dialog.Model, input },
+        };
+        IDialogReference dialog = await DialogService.ShowAsync<SaveQueryDialog>("Save query", parameters);
+        DialogResult? dialogResult = await dialog.Result;
+        if (dialogResult is null || dialogResult.Canceled)
+        {
+            return;
+        }
+
+        QueryExecutionMode mode = activeTab == 1 ? QueryExecutionMode.Sql : QueryExecutionMode.Visual;
+        string? sql = mode == QueryExecutionMode.Sql ? rawSql : null;
+        string? modelJson = mode == QueryExecutionMode.Visual && baseView is not null
+            ? JsonSerializer.Serialize(BuildModel())
+            : null;
+        DateTimeOffset now = Clock.UtcNow;
+
+        SavedQuery saved = new SavedQuery
+        {
+            Id = Guid.NewGuid(),
+            Name = input.Name.Trim(),
+            Description = input.Description,
+            FolderId = input.FolderId,
+            SourceId = sourceId,
+            Mode = mode,
+            Sql = sql,
+            ModelJson = modelJson,
+            RenderConfigJson = "{}",
+            CreatedBy = await CurrentUserIdAsync(),
+            CreatedAtUtc = now,
+            UpdatedAtUtc = now,
+        };
+        SavedQueries.Add(saved);
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        Snackbar.Add("Query saved.", Severity.Success);
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        if (result is null)
+        {
+            return;
+        }
+
+        await Js.InvokeVoidAsync("cesDownload", "result.csv", "text/csv", QueryResultExporter.ToCsv(result));
+    }
+
+    private async Task ExportJsonAsync()
+    {
+        if (result is null)
+        {
+            return;
+        }
+
+        await Js.InvokeVoidAsync("cesDownload", "result.json", "application/json", QueryResultExporter.ToJson(result));
+    }
+
+    private async Task<string> CurrentUserIdAsync()
+    {
+        if (AuthState is null)
+        {
+            return "unknown";
+        }
+
+        AuthenticationState state = await AuthState;
+        return state.User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? state.User.Identity?.Name
+            ?? "unknown";
+    }
+
+    private async Task RunSqlAsync()
+    {
+        await ExecuteAsync(() => Runner.ExecuteAsync(rawSql, [], CancellationToken.None));
+    }
+
+    private async Task ExecuteAsync(Func<Task<QueryResultSet>> execute)
+    {
+        busy = true;
+        error = null;
+        result = null;
+        try
+        {
+            result = await execute();
+        }
+        catch (QueryValidationException exception)
+        {
+            error = exception.Message;
+        }
+        catch (PostgresException exception)
+        {
+            error = "Query failed: " + exception.MessageText;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private FilterCondition BuildCondition(ExploreFilterRow row)
+    {
+        JsonNode? value = IsValuelessOperator(row.Operator) ? null : JsonValue.Create(row.Value);
+        return new FilterCondition
+        {
+            View = row.View,
+            Column = row.Column,
+            Operator = row.Operator,
+            Value = value,
+        };
+    }
+
+    private static bool IsValuelessOperator(ConditionOperator op)
+    {
+        return op is ConditionOperator.IsNull or ConditionOperator.IsNotNull;
+    }
+}

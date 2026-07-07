@@ -64,6 +64,33 @@ public sealed class EventRepository : IEventRepository
             .ConfigureAwait(false);
     }
 
+    public async Task<long> CountReceivedBeforeAsync(
+        Guid sourceId,
+        DateTimeOffset cutoffUtc,
+        CancellationToken cancellationToken
+    )
+    {
+        return await dbContext
+            .Events.AsNoTracking()
+            .LongCountAsync(
+                record => record.SourceId == sourceId && record.ReceivedAtUtc < cutoffUtc,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+    }
+
+    public async Task<int> DeleteReceivedBeforeAsync(
+        Guid sourceId,
+        DateTimeOffset cutoffUtc,
+        CancellationToken cancellationToken
+    )
+    {
+        return await dbContext
+            .Events.Where(record => record.SourceId == sourceId && record.ReceivedAtUtc < cutoffUtc)
+            .ExecuteDeleteAsync(cancellationToken)
+            .ConfigureAwait(false);
+    }
+
     public async Task<DateTimeOffset?> LatestReceivedAtAsync(
         Guid sourceId,
         CancellationToken cancellationToken
@@ -93,6 +120,34 @@ public sealed class EventRepository : IEventRepository
                 record => record.SourceId == sourceId && record.EventId == eventId,
                 cancellationToken
             )
+            .ConfigureAwait(false);
+    }
+
+    public async Task<EventRecord?> GetByDedupKeyAsync(
+        Guid sourceId,
+        string dedupKey,
+        CancellationToken cancellationToken
+    )
+    {
+        return await dbContext
+            .Events.FirstOrDefaultAsync(
+                record => record.SourceId == sourceId && record.DedupKey == dedupKey,
+                cancellationToken
+            )
+            .ConfigureAwait(false);
+    }
+
+    public async Task<EventRecord?> GetLatestByGroupKeyAsync(
+        Guid sourceId,
+        string groupKey,
+        CancellationToken cancellationToken
+    )
+    {
+        return await dbContext
+            .Events.AsNoTracking()
+            .Where(record => record.SourceId == sourceId && record.GroupKey == groupKey)
+            .OrderByDescending(record => record.ReceivedAtUtc)
+            .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
     }
 

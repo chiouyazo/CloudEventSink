@@ -14,5 +14,9 @@ public sealed class SourceFormModel
 
     public bool IsActive { get; set; } = true;
 
+    public IngestMode Mode { get; set; } = IngestMode.IgnoreDuplicateById;
+
+    public string? DedupKeyPaths { get; set; }
+
     public bool IsEdit { get; set; }
 }

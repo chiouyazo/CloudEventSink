@@ -104,6 +104,8 @@ else
             SecretLastFour = secret.LastFour,
             IpAllowlist = Normalize(model.IpAllowlist),
             IsActive = model.IsActive,
+            Mode = model.Mode,
+            DedupKeyPaths = Normalize(model.DedupKeyPaths),
             CreatedAtUtc = now,
             UpdatedAtUtc = now,
         };
@@ -123,6 +125,8 @@ else
             AuthMode = source.AuthMode,
             IpAllowlist = source.IpAllowlist,
             IsActive = source.IsActive,
+            Mode = source.Mode,
+            DedupKeyPaths = source.DedupKeyPaths,
             IsEdit = true,
         };
 
@@ -156,6 +160,8 @@ else
         tracked.Slug = model.Slug.Trim();
         tracked.IpAllowlist = Normalize(model.IpAllowlist);
         tracked.IsActive = model.IsActive;
+        tracked.Mode = model.Mode;
+        tracked.DedupKeyPaths = Normalize(model.DedupKeyPaths);
         tracked.UpdatedAtUtc = Clock.UtcNow;
 
         await UnitOfWork.SaveChangesAsync(CancellationToken.None);

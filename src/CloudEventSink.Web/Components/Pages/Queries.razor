@@ -1,0 +1,158 @@
+@page "/queries"
+@attribute [Authorize]
+@using System.Security.Claims
+@using CloudEventSink.Core.Entities
+@inject ISavedQueryRepository SavedQueries
+@inject IQueryFolderRepository Folders
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject IDialogService DialogService
+@inject ISnackbar Snackbar
+@inject NavigationManager Navigation
+@inject IJSRuntime Js
+
+<PageTitle>Saved queries</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">Saved queries</MudText>
+
+<div class="d-flex gap-2 align-center mb-4" style="max-width:480px">
+    <MudTextField @bind-Value="newFolderName" Label="New folder" Margin="Margin.Dense" />
+    <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.CreateNewFolder" OnClick="AddFolderAsync">Add</MudButton>
+</div>
+
+@if (queries is null)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (queries.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">No saved queries yet. Build one in Explore and click "Save query".</MudAlert>
+}
+else
+{
+    <MudTable Items="queries" Hover="true" Dense="true" OnRowClick="OnRowClick" T="SavedQuery">
+        <HeaderContent>
+            <MudTh>Name</MudTh>
+            <MudTh>Folder</MudTh>
+            <MudTh>Mode</MudTh>
+            <MudTh Style="text-align:right">Actions</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="Name">@context.Name</MudTd>
+            <MudTd DataLabel="Folder">@FolderName(context.FolderId)</MudTd>
+            <MudTd DataLabel="Mode">@context.Mode</MudTd>
+            <MudTd DataLabel="Actions" Style="text-align:right">
+                <MudIconButton Icon="@Icons.Material.Outlined.PlayArrow" Size="Size.Small" OnClick="() => Open(context.Id)" aria-label="Open" />
+                <MudIconButton Icon="@Icons.Material.Outlined.Link" Size="Size.Small" OnClick="() => CopyLinkAsync(context.Id)" aria-label="Copy link" />
+                <MudIconButton Icon="@Icons.Material.Outlined.Delete" Color="Color.Error" Size="Size.Small" OnClick="() => DeleteAsync(context)" aria-label="Delete" />
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private List<SavedQuery>? queries;
+    private List<QueryFolder> folders = new List<QueryFolder>();
+    private string newFolderName = string.Empty;
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthState { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        IReadOnlyList<QueryFolder> loadedFolders = await Folders.ListAsync(CancellationToken.None);
+        folders = new List<QueryFolder>(loadedFolders);
+        IReadOnlyList<SavedQuery> loaded = await SavedQueries.ListAsync(CancellationToken.None);
+        queries = new List<SavedQuery>(loaded);
+    }
+
+    private string FolderName(Guid? folderId)
+    {
+        if (folderId is null)
+        {
+            return string.Empty;
+        }
+
+        return folders.FirstOrDefault(folder => folder.Id == folderId)?.Name ?? string.Empty;
+    }
+
+    private void Open(Guid id)
+    {
+        Navigation.NavigateTo($"/queries/{id}");
+    }
+
+    private void OnRowClick(TableRowClickEventArgs<SavedQuery> args)
+    {
+        if (args.Item is not null)
+        {
+            Open(args.Item.Id);
+        }
+    }
+
+    private async Task CopyLinkAsync(Guid id)
+    {
+        string url = Navigation.ToAbsoluteUri($"/queries/{id}").ToString();
+        bool copied = await Js.InvokeAsync<bool>("cesCopy", url);
+        Snackbar.Add(copied ? "Link copied to clipboard" : url, copied ? Severity.Success : Severity.Info);
+    }
+
+    private async Task AddFolderAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newFolderName))
+        {
+            return;
+        }
+
+        QueryFolder folder = new QueryFolder
+        {
+            Id = Guid.NewGuid(),
+            Name = newFolderName.Trim(),
+            CreatedBy = await CurrentUserIdAsync(),
+            CreatedAtUtc = Clock.UtcNow,
+        };
+        Folders.Add(folder);
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        newFolderName = string.Empty;
+        await ReloadAsync();
+    }
+
+    private async Task DeleteAsync(SavedQuery query)
+    {
+        bool? confirmed = await DialogService.ShowMessageBoxAsync(
+            "Delete query",
+            $"Delete '{query.Name}'?",
+            yesText: "Delete",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        SavedQuery? tracked = await SavedQueries.GetByIdAsync(query.Id, CancellationToken.None);
+        if (tracked is not null)
+        {
+            SavedQueries.Remove(tracked);
+            await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        }
+
+        await ReloadAsync();
+    }
+
+    private async Task<string> CurrentUserIdAsync()
+    {
+        if (AuthState is null)
+        {
+            return "unknown";
+        }
+
+        AuthenticationState state = await AuthState;
+        return state.User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? state.User.Identity?.Name
+            ?? "unknown";
+    }
+}

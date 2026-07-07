@@ -1,0 +1,188 @@
+@page "/settings/api-tokens"
+@attribute [Authorize]
+@using System.Security.Claims
+@using CloudEventSink.Core.Entities
+@using CloudEventSink.Core.Security
+@inject IApiTokenRepository Tokens
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject IDialogService DialogService
+@inject ISnackbar Snackbar
+
+<PageTitle>API tokens</PageTitle>
+
+<MudText Typo="Typo.h4" GutterBottom="true">API tokens</MudText>
+<MudText Typo="Typo.body2" Class="mud-text-secondary mb-4">
+    Read-only tokens for programmatic access and Grafana. Use as <code>Authorization: Bearer &lt;token&gt;</code> against <code>POST /api/query/execute</code>.
+</MudText>
+
+<MudExpansionPanels Class="mb-4" Elevation="0">
+    <MudExpansionPanel Text="Grafana / programmatic access">
+        <MudText Typo="Typo.body2" Class="mb-2">
+            Two options to read CloudEventSink data from Grafana:
+        </MudText>
+        <MudText Typo="Typo.body2">
+            1. <b>Grafana Infinity data source</b> against <code>POST /api/query/execute</code> with header
+            <code>Authorization: Bearer &lt;token&gt;</code>. Body: <code>{ "mode": "Sql", "sql": "SELECT ..." }</code>
+            or <code>{ "mode": "Visual", "sourceId": "...", "model": { ... } }</code>. The response has
+            <code>columns</code> and <code>rows</code>.
+        </MudText>
+        <MudText Typo="Typo.body2" Class="mt-2">
+            2. <b>Read-only PostgreSQL data source</b> pointed at the generated views
+            (<code>v_&lt;slug&gt;_&lt;eventType&gt;</code>) for a trusted, internal setup.
+            The available views and columns are listed per source in Explore.
+        </MudText>
+    </MudExpansionPanel>
+</MudExpansionPanels>
+
+<div class="d-flex gap-2 align-center mb-4" style="max-width:520px">
+    <MudTextField @bind-Value="newName" Label="Token name" Margin="Margin.Dense" />
+    <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.Add" OnClick="CreateAsync" Disabled="busy">
+        Create
+    </MudButton>
+</div>
+
+@if (tokens is null)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (tokens.Count == 0)
+{
+    <MudAlert Severity="Severity.Info">No API tokens yet.</MudAlert>
+}
+else
+{
+    <MudTable Items="tokens" Hover="true" Dense="true">
+        <HeaderContent>
+            <MudTh>Name</MudTh>
+            <MudTh>Token</MudTh>
+            <MudTh>Status</MudTh>
+            <MudTh>Created</MudTh>
+            <MudTh Style="text-align:right">Actions</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="Name">@context.Name</MudTd>
+            <MudTd DataLabel="Token">…@context.TokenLastFour</MudTd>
+            <MudTd DataLabel="Status">
+                @if (context.RevokedAtUtc is not null)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Error">Revoked</MudChip>
+                }
+                else if (context.ExpiresAtUtc is not null && context.ExpiresAtUtc <= Clock.UtcNow)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Warning">Expired</MudChip>
+                }
+                else
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Success">Active</MudChip>
+                }
+            </MudTd>
+            <MudTd DataLabel="Created">@context.CreatedAtUtc.UtcDateTime.ToString("u", System.Globalization.CultureInfo.InvariantCulture)</MudTd>
+            <MudTd DataLabel="Actions" Style="text-align:right">
+                @if (context.RevokedAtUtc is null)
+                {
+                    <MudIconButton Icon="@Icons.Material.Outlined.Block" Color="Color.Error" Size="Size.Small" OnClick="() => RevokeAsync(context)" />
+                }
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private List<ApiToken>? tokens;
+    private string newName = string.Empty;
+    private bool busy;
+
+    [CascadingParameter]
+    private Task<AuthenticationState>? AuthState { get; set; }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        IReadOnlyList<ApiToken> loaded = await Tokens.ListAsync(CancellationToken.None);
+        tokens = new List<ApiToken>(loaded);
+    }
+
+    private async Task CreateAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newName))
+        {
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            string plaintext = ApiTokenHasher.Generate();
+            DateTimeOffset now = Clock.UtcNow;
+            ApiToken token = new ApiToken
+            {
+                Id = Guid.NewGuid(),
+                Name = newName.Trim(),
+                TokenHash = ApiTokenHasher.Hash(plaintext),
+                TokenLastFour = ApiTokenHasher.LastFour(plaintext),
+                CreatedBy = await CurrentUserIdAsync(),
+                CreatedAtUtc = now,
+            };
+            Tokens.Add(token);
+            await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+            newName = string.Empty;
+            await ReloadAsync();
+            await ShowTokenAsync(plaintext);
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task RevokeAsync(ApiToken token)
+    {
+        bool? confirmed = await DialogService.ShowMessageBoxAsync(
+            "Revoke token",
+            $"Revoke '{token.Name}'? Clients using it will stop working immediately.",
+            yesText: "Revoke",
+            cancelText: "Cancel");
+        if (confirmed != true)
+        {
+            return;
+        }
+
+        ApiToken? tracked = await Tokens.GetByIdAsync(token.Id, CancellationToken.None);
+        if (tracked is not null)
+        {
+            tracked.RevokedAtUtc = Clock.UtcNow;
+            await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+        }
+
+        await ReloadAsync();
+    }
+
+    private async Task ShowTokenAsync(string plaintext)
+    {
+        DialogParameters<PlainSecretDialog> parameters = new DialogParameters<PlainSecretDialog>
+        {
+            { dialog => dialog.Value, plaintext },
+            { dialog => dialog.Label, "API token" },
+        };
+        DialogOptions options = new DialogOptions { CloseOnEscapeKey = false, BackdropClick = false, FullWidth = true, MaxWidth = MaxWidth.Small };
+        await DialogService.ShowAsync<PlainSecretDialog>("API token", parameters, options);
+    }
+
+    private async Task<string> CurrentUserIdAsync()
+    {
+        if (AuthState is null)
+        {
+            return "unknown";
+        }
+
+        AuthenticationState state = await AuthState;
+        return state.User.FindFirstValue(ClaimTypes.NameIdentifier)
+            ?? state.User.Identity?.Name
+            ?? "unknown";
+    }
+}

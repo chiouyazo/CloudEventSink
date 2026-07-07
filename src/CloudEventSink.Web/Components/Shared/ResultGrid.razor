@@ -1,0 +1,201 @@
+@using System.Text.Json.Nodes
+@using CloudEventSink.Core.Query
+
+@if (Groupable && keys.Count > 0)
+{
+    <div class="d-flex flex-wrap align-center gap-2 mb-2">
+        <MudText Typo="Typo.body2" Class="mud-text-secondary">Group by:</MudText>
+        @for (int index = 0; index < groupKeys.Count; index++)
+        {
+            int position = index;
+            string groupKey = groupKeys[position];
+            <div class="d-inline-flex align-center" style="border:1px solid var(--mud-palette-lines-default);border-radius:16px;padding-left:4px">
+                <MudIconButton Icon="@Icons.Material.Outlined.ChevronLeft" Size="Size.Small" Disabled="@(position == 0)" OnClick="@(() => MoveGroupAsync(position, -1))" aria-label="Move earlier" />
+                <MudChip T="string" Size="Size.Small" Color="Color.Primary" Variant="Variant.Text" OnClose="@(() => RemoveGroupAsync(groupKey))">
+                    @(position + 1). @TitleFor(groupKey)
+                </MudChip>
+                <MudIconButton Icon="@Icons.Material.Outlined.ChevronRight" Size="Size.Small" Disabled="@(position == groupKeys.Count - 1)" OnClick="@(() => MoveGroupAsync(position, 1))" aria-label="Move later" />
+            </div>
+        }
+        @foreach (string key in keys.Where(candidate => !groupKeys.Contains(candidate)))
+        {
+            string addKey = key;
+            <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Outlined" OnClick="@(() => AddGroupAsync(addKey))">
+                + @TitleFor(addKey)
+            </MudChip>
+        }
+        @if (groupKeys.Count > 0)
+        {
+            <MudButton Size="Size.Small" Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Clear" OnClick="ClearGroupsAsync">Clear</MudButton>
+        }
+    </div>
+}
+
+<MudDataGrid @key="@gridKey"
+             T="IReadOnlyDictionary<string, string>"
+             Items="@rows"
+             Dense="true"
+             Hover="true"
+             Bordered="true"
+             Striped="true"
+             Groupable="@Groupable"
+             Filterable="true"
+             SortMode="SortMode.Multiple"
+             FixedHeader="true"
+             Height="@Height">
+    <Columns>
+        @foreach (string key in orderedKeys)
+        {
+            string columnKey = key;
+            bool grouped = groupKeys.Contains(columnKey);
+            <TemplateColumn @key="columnKey"
+                            T="IReadOnlyDictionary<string, string>"
+                            Title="@TitleFor(columnKey)"
+                            Groupable="@Groupable"
+                            Grouping="@grouped"
+                            GroupExpanded="true"
+                            Hidden="@grouped"
+                            Sortable="true"
+                            SortBy="@(row => Value(row, columnKey))"
+                            GroupBy="@(row => Value(row, columnKey))">
+                <CellTemplate>
+                    @Value(context.Item, columnKey)
+                </CellTemplate>
+                <GroupTemplate>
+                    <span style="font-weight:600">@TitleFor(columnKey): @context.Grouping.Key (@context.Grouping.Count())</span>
+                </GroupTemplate>
+            </TemplateColumn>
+        }
+    </Columns>
+</MudDataGrid>
+
+@code {
+    [Parameter]
+    public QueryResultSet Result { get; set; } = new QueryResultSet();
+
+    [Parameter]
+    public bool Groupable { get; set; } = true;
+
+    [Parameter]
+    public string Height { get; set; } = "480px";
+
+    [Parameter]
+    public IReadOnlyList<string> Grouping { get; set; } = [];
+
+    [Parameter]
+    public EventCallback<IReadOnlyList<string>> GroupingChanged { get; set; }
+
+    private List<string> keys = new List<string>();
+    private List<string> titles = new List<string>();
+    private List<IReadOnlyDictionary<string, string>> rows = new List<IReadOnlyDictionary<string, string>>();
+    private List<string> groupKeys = new List<string>();
+    private IReadOnlyList<string>? appliedGrouping;
+
+    private IEnumerable<string> orderedKeys => groupKeys.Concat(keys.Where(key => !groupKeys.Contains(key)));
+
+    private string gridKey => string.Join("|", orderedKeys);
+
+    protected override void OnParametersSet()
+    {
+        BuildKeys();
+        if (!ReferenceEquals(appliedGrouping, Grouping))
+        {
+            appliedGrouping = Grouping;
+            groupKeys = Grouping.Where(keys.Contains).ToList();
+        }
+        else
+        {
+            groupKeys = groupKeys.Where(keys.Contains).ToList();
+        }
+
+        rows = Result.Rows.Select(BuildRow).ToList();
+    }
+
+    private async Task AddGroupAsync(string key)
+    {
+        if (!groupKeys.Contains(key))
+        {
+            groupKeys.Add(key);
+            await NotifyGroupingChangedAsync();
+        }
+    }
+
+    private async Task RemoveGroupAsync(string key)
+    {
+        if (groupKeys.Remove(key))
+        {
+            await NotifyGroupingChangedAsync();
+        }
+    }
+
+    private async Task MoveGroupAsync(int index, int delta)
+    {
+        int target = index + delta;
+        if (target < 0 || target >= groupKeys.Count)
+        {
+            return;
+        }
+
+        (groupKeys[index], groupKeys[target]) = (groupKeys[target], groupKeys[index]);
+        await NotifyGroupingChangedAsync();
+    }
+
+    private async Task ClearGroupsAsync()
+    {
+        if (groupKeys.Count > 0)
+        {
+            groupKeys.Clear();
+            await NotifyGroupingChangedAsync();
+        }
+    }
+
+    private async Task NotifyGroupingChangedAsync()
+    {
+        appliedGrouping = groupKeys;
+        if (GroupingChanged.HasDelegate)
+        {
+            await GroupingChanged.InvokeAsync(groupKeys.ToList());
+        }
+    }
+
+    private string TitleFor(string key)
+    {
+        int index = keys.IndexOf(key);
+        return index >= 0 ? titles[index] : key;
+    }
+
+    private void BuildKeys()
+    {
+        titles = Result.Columns.Select(column => column.Name).ToList();
+        keys = new List<string>();
+        HashSet<string> used = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string title in titles)
+        {
+            string key = title;
+            int suffix = 2;
+            while (!used.Add(key))
+            {
+                key = $"{title}_{suffix}";
+                suffix++;
+            }
+
+            keys.Add(key);
+        }
+    }
+
+    private IReadOnlyDictionary<string, string> BuildRow(IReadOnlyList<JsonNode?> row)
+    {
+        Dictionary<string, string> map = new Dictionary<string, string>(StringComparer.Ordinal);
+        for (int index = 0; index < keys.Count; index++)
+        {
+            map[keys[index]] = index < row.Count ? row[index]?.ToString() ?? string.Empty : string.Empty;
+        }
+
+        return map;
+    }
+
+    private static string Value(IReadOnlyDictionary<string, string> row, string key)
+    {
+        return row.TryGetValue(key, out string? value) ? value : string.Empty;
+    }
+}

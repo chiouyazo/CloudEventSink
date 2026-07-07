@@ -24,6 +24,13 @@ public sealed class SourceConfiguration : IEntityTypeConfiguration<Source>
         builder.Property(source => source.SecretLastFour).IsRequired().HasMaxLength(8);
         builder.Property(source => source.IpAllowlist).HasMaxLength(2048);
         builder.Property(source => source.IsActive).IsRequired();
+        builder
+            .Property(source => source.Mode)
+            .HasConversion<string>()
+            .HasMaxLength(24)
+            .IsRequired()
+            .HasDefaultValue(Core.Enums.IngestMode.IgnoreDuplicateById);
+        builder.Property(source => source.DedupKeyPaths).HasMaxLength(1024);
         builder.Property(source => source.CreatedAtUtc).IsRequired();
         builder.Property(source => source.UpdatedAtUtc).IsRequired();
 

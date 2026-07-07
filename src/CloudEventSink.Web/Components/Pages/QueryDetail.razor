@@ -1,0 +1,322 @@
+@page "/queries/{Id:guid}"
+@attribute [Authorize]
+@using System.Globalization
+@using System.Text.Json
+@using CloudEventSink.Core.Entities
+@using CloudEventSink.Core.Projection
+@using CloudEventSink.Core.Query
+@using CloudEventSink.Core.Query.Sql
+@using Npgsql
+@inject ISavedQueryRepository SavedQueries
+@inject IQueryFolderRepository Folders
+@inject ISchemaProjectionRepository Projections
+@inject IQueryModelCompiler Compiler
+@inject IQueryRunner Runner
+@inject IUnitOfWork UnitOfWork
+@inject IClock Clock
+@inject NavigationManager Navigation
+@inject ISnackbar Snackbar
+@inject IJSRuntime Js
+
+<PageTitle>@(query?.Name ?? "Query")</PageTitle>
+
+<MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.ArrowBack" Href="/queries" Class="mb-2">All saved queries</MudButton>
+
+@if (loading)
+{
+    <MudProgressCircular Indeterminate="true" />
+}
+else if (query is null)
+{
+    <MudAlert Severity="Severity.Error">This saved query does not exist.</MudAlert>
+}
+else
+{
+    <div class="d-flex justify-space-between align-center mb-1">
+        <MudText Typo="Typo.h4">@query.Name</MudText>
+        <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Link" OnClick="CopyLinkAsync">Copy link</MudButton>
+    </div>
+    <MudText Typo="Typo.body2" Class="mud-text-secondary mb-4">
+        @FolderName(query.FolderId)@(query.FolderId is null ? "" : " · ")@originMode
+    </MudText>
+
+    <MudText Typo="Typo.subtitle2" Class="mb-1">This is the exact read-only SQL that runs. Edit it and run again as needed.</MudText>
+    <MudTextField T="string" @bind-Value="sql" Lines="10" Variant="Variant.Outlined" Class="ces-code" Immediate="true" />
+
+    <div class="d-flex flex-wrap gap-2 mt-2 mb-4">
+        <MudButton Variant="Variant.Filled" Color="Color.Primary" StartIcon="@Icons.Material.Outlined.PlayArrow" OnClick="RunAsync" Disabled="busy || string.IsNullOrWhiteSpace(sql)">Run</MudButton>
+        <MudButton Variant="Variant.Outlined" StartIcon="@Icons.Material.Outlined.Save" OnClick="SaveAsync" Disabled="busy || !HasChanges">Save changes</MudButton>
+        <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Undo" OnClick="Revert" Disabled="busy || !HasChanges">Revert</MudButton>
+        <MudSpacer />
+        @if (result is not null)
+        {
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Download" OnClick="ExportCsvAsync">CSV</MudButton>
+            <MudButton Variant="Variant.Text" StartIcon="@Icons.Material.Outlined.Download" OnClick="ExportJsonAsync">JSON</MudButton>
+        }
+    </div>
+
+    @if (error is not null)
+    {
+        <MudAlert Severity="Severity.Error" Class="my-4">@error</MudAlert>
+    }
+
+    @if (busy)
+    {
+        <MudProgressLinear Indeterminate="true" Class="my-4" />
+    }
+
+    @if (result is not null)
+    {
+        @if (result.Truncated)
+        {
+            <MudAlert Severity="Severity.Warning" Class="mb-2">Showing the first @QueryLimits.MaxRows rows (truncated).</MudAlert>
+        }
+        <ResultGrid Result="result" Groupable="true" Height="440px" Grouping="grouping" GroupingChanged="OnGroupingChanged" />
+    }
+}
+
+@code {
+    [Parameter]
+    public Guid Id { get; set; }
+
+    private bool loading = true;
+    private SavedQuery? query;
+    private List<QueryFolder> folders = new List<QueryFolder>();
+    private string originMode = string.Empty;
+    private string sql = string.Empty;
+    private string savedSql = string.Empty;
+    private List<string> grouping = new List<string>();
+    private List<string> savedGrouping = new List<string>();
+    private QueryResultSet? result;
+    private string? error;
+    private bool busy;
+
+    private bool HasChanges =>
+        !string.Equals(sql, savedSql, StringComparison.Ordinal)
+        || !grouping.SequenceEqual(savedGrouping, StringComparer.Ordinal);
+
+    protected override async Task OnParametersSetAsync()
+    {
+        loading = true;
+        result = null;
+        error = null;
+        query = await SavedQueries.GetByIdAsync(Id, CancellationToken.None);
+        if (query is null)
+        {
+            loading = false;
+            return;
+        }
+
+        folders = new List<QueryFolder>(await Folders.ListAsync(CancellationToken.None));
+        grouping = ParseGrouping(query.RenderConfigJson);
+        savedGrouping = grouping.ToList();
+        await PrepareSqlAsync();
+        loading = false;
+
+        if (error is null && !string.IsNullOrWhiteSpace(sql))
+        {
+            await RunAsync();
+        }
+    }
+
+    private async Task PrepareSqlAsync()
+    {
+        if (query is null)
+        {
+            return;
+        }
+
+        if (query.Mode == QueryExecutionMode.Sql)
+        {
+            originMode = "Saved as SQL";
+            sql = query.Sql ?? string.Empty;
+            savedSql = sql;
+            return;
+        }
+
+        originMode = "Compiled from the visual builder";
+        try
+        {
+            if (query.SourceId is null || string.IsNullOrWhiteSpace(query.ModelJson))
+            {
+                throw new QueryValidationException("This saved query is missing its source or model.");
+            }
+
+            QueryModel? model = JsonSerializer.Deserialize<QueryModel>(query.ModelJson)
+                ?? throw new QueryValidationException("The saved query model could not be read.");
+            IReadOnlyList<SchemaProjection> projections =
+                await Projections.ListBySourceAsync(query.SourceId.Value, CancellationToken.None);
+            ProjectionCatalog catalog = ProjectionCatalogFactory.Create(projections);
+            GeneratedSql generated = Compiler.Compile(model, catalog);
+            sql = InlineParameters(generated);
+            savedSql = sql;
+        }
+        catch (QueryValidationException exception)
+        {
+            error = exception.Message;
+            sql = string.Empty;
+            savedSql = string.Empty;
+        }
+    }
+
+    private async Task RunAsync()
+    {
+        if (string.IsNullOrWhiteSpace(sql))
+        {
+            return;
+        }
+
+        busy = true;
+        error = null;
+        try
+        {
+            result = await Runner.ExecuteAsync(sql, [], CancellationToken.None);
+        }
+        catch (QueryValidationException exception)
+        {
+            error = exception.Message;
+            result = null;
+        }
+        catch (PostgresException exception)
+        {
+            error = "Query failed: " + exception.MessageText;
+            result = null;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void OnGroupingChanged(IReadOnlyList<string> value)
+    {
+        grouping = value.ToList();
+    }
+
+    private async Task SaveAsync()
+    {
+        SavedQuery? tracked = await SavedQueries.GetByIdAsync(Id, CancellationToken.None);
+        if (tracked is null)
+        {
+            return;
+        }
+
+        bool sqlChanged = !string.Equals(sql, savedSql, StringComparison.Ordinal);
+        if (sqlChanged)
+        {
+            tracked.Mode = QueryExecutionMode.Sql;
+            tracked.Sql = sql;
+        }
+
+        tracked.RenderConfigJson = JsonSerializer.Serialize(new RenderConfig { Grouping = grouping });
+        tracked.UpdatedAtUtc = Clock.UtcNow;
+        await UnitOfWork.SaveChangesAsync(CancellationToken.None);
+
+        savedSql = sql;
+        savedGrouping = grouping.ToList();
+        if (sqlChanged)
+        {
+            query = tracked;
+            originMode = "Saved as SQL";
+        }
+
+        Snackbar.Add("Query saved", Severity.Success);
+    }
+
+    private void Revert()
+    {
+        sql = savedSql;
+        grouping = savedGrouping.ToList();
+    }
+
+    private static List<string> ParseGrouping(string? renderConfigJson)
+    {
+        if (string.IsNullOrWhiteSpace(renderConfigJson))
+        {
+            return new List<string>();
+        }
+
+        try
+        {
+            RenderConfig? config = JsonSerializer.Deserialize<RenderConfig>(renderConfigJson);
+            return config?.Grouping.ToList() ?? new List<string>();
+        }
+        catch (JsonException)
+        {
+            return new List<string>();
+        }
+    }
+
+    private async Task CopyLinkAsync()
+    {
+        string url = Navigation.ToAbsoluteUri($"/queries/{Id}").ToString();
+        bool copied = await Js.InvokeAsync<bool>("cesCopy", url);
+        Snackbar.Add(copied ? "Link copied to clipboard" : url, copied ? Severity.Success : Severity.Info);
+    }
+
+    private async Task ExportCsvAsync()
+    {
+        if (result is not null)
+        {
+            await Js.InvokeVoidAsync("cesDownload", "result.csv", "text/csv", QueryResultExporter.ToCsv(result));
+        }
+    }
+
+    private async Task ExportJsonAsync()
+    {
+        if (result is not null)
+        {
+            await Js.InvokeVoidAsync("cesDownload", "result.json", "application/json", QueryResultExporter.ToJson(result));
+        }
+    }
+
+    private string FolderName(Guid? folderId)
+    {
+        if (folderId is null)
+        {
+            return string.Empty;
+        }
+
+        return folders.FirstOrDefault(folder => folder.Id == folderId)?.Name ?? string.Empty;
+    }
+
+    private static string InlineParameters(GeneratedSql generated)
+    {
+        string text = generated.CommandText;
+        foreach (SqlParameterSpec parameter in generated.Parameters.OrderByDescending(spec => spec.Name.Length))
+        {
+            text = text.Replace("@" + parameter.Name, Literal(parameter), StringComparison.Ordinal);
+        }
+
+        return text;
+    }
+
+    private static string Literal(SqlParameterSpec parameter)
+    {
+        return parameter.Type switch
+        {
+            SqlParameterType.Numeric => Convert.ToString(parameter.Value, CultureInfo.InvariantCulture) ?? "0",
+            SqlParameterType.Boolean => parameter.Value is true ? "true" : "false",
+            SqlParameterType.NumericArray => NumericArrayLiteral(parameter.Value),
+            SqlParameterType.TextArray => TextArrayLiteral(parameter.Value),
+            _ => TextLiteral(parameter.Value?.ToString() ?? string.Empty),
+        };
+    }
+
+    private static string NumericArrayLiteral(object? value)
+    {
+        IEnumerable<decimal> numbers = value as IEnumerable<decimal> ?? [];
+        return "ARRAY[" + string.Join(", ", numbers.Select(number => number.ToString(CultureInfo.InvariantCulture))) + "]";
+    }
+
+    private static string TextArrayLiteral(object? value)
+    {
+        IEnumerable<string> texts = value as IEnumerable<string> ?? [];
+        return "ARRAY[" + string.Join(", ", texts.Select(TextLiteral)) + "]";
+    }
+
+    private static string TextLiteral(string value)
+    {
+        return "'" + value.Replace("'", "''", StringComparison.Ordinal) + "'";
+    }
+}

@@ -1,0 +1,49 @@
+@using CloudEventSink.Core.Entities
+@using CloudEventSink.Web.Components.Explore
+@inject IQueryFolderRepository Folders
+
+<MudDialog>
+    <DialogContent>
+        <MudTextField @bind-Value="Model.Name" Label="Name" Required="true" RequiredError="A name is required." />
+        <MudTextField @bind-Value="Model.Description" Label="Description" Class="mt-3" />
+        <MudSelect T="Guid?" @bind-Value="Model.FolderId" Label="Folder (optional)" Clearable="true" Dense="true" Class="mt-3">
+            @foreach (QueryFolder folder in folders)
+            {
+                <MudSelectItem T="Guid?" Value="folder.Id">@folder.Name</MudSelectItem>
+            }
+        </MudSelect>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="Submit">Save</MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter]
+    private IMudDialogInstance MudDialog { get; set; } = default!;
+
+    [Parameter]
+    public SaveQueryInput Model { get; set; } = new SaveQueryInput();
+
+    private List<QueryFolder> folders = new List<QueryFolder>();
+
+    protected override async Task OnInitializedAsync()
+    {
+        IReadOnlyList<QueryFolder> loaded = await Folders.ListAsync(CancellationToken.None);
+        folders = new List<QueryFolder>(loaded);
+    }
+
+    private void Submit()
+    {
+        if (!string.IsNullOrWhiteSpace(Model.Name))
+        {
+            MudDialog.Close(DialogResult.Ok(Model));
+        }
+    }
+
+    private void Cancel()
+    {
+        MudDialog.Cancel();
+    }
+}

@@ -5,6 +5,7 @@ using CloudEventSink.Infrastructure.Persistence;
 using CloudEventSink.Web.Auth;
 using CloudEventSink.Web.Configuration;
 using CloudEventSink.Web.Ingest;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Components.Authorization;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -72,9 +73,14 @@ public static class WebServiceRegistration
 
     private static void ConfigureIdentity(WebApplicationBuilder builder)
     {
-        builder
-            .Services.AddAuthentication(IdentityConstants.ApplicationScheme)
-            .AddIdentityCookies();
+        AuthenticationBuilder authentication = builder.Services.AddAuthentication(
+            IdentityConstants.ApplicationScheme
+        );
+        authentication.AddIdentityCookies();
+        authentication.AddScheme<AuthenticationSchemeOptions, ApiTokenAuthenticationHandler>(
+            ApiTokenAuthenticationHandler.SchemeName,
+            configureOptions: null
+        );
 
         builder
             .Services.AddIdentityCore<IdentityUser>(options =>
@@ -103,7 +109,18 @@ public static class WebServiceRegistration
             options.SlidingExpiration = true;
         });
 
-        builder.Services.AddAuthorization();
+        builder.Services.AddAuthorization(options =>
+            options.AddPolicy(
+                AuthorizationPolicies.QueryAccess,
+                policy =>
+                    policy
+                        .RequireAuthenticatedUser()
+                        .AddAuthenticationSchemes(
+                            IdentityConstants.ApplicationScheme,
+                            ApiTokenAuthenticationHandler.SchemeName
+                        )
+            )
+        );
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddScoped<
             AuthenticationStateProvider,

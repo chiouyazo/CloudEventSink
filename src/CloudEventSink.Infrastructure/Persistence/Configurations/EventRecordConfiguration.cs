@@ -16,6 +16,8 @@ public sealed class EventRecordConfiguration : IEntityTypeConfiguration<EventRec
         builder.Property(record => record.SpecVersion).HasMaxLength(32);
         builder.Property(record => record.EventType).IsRequired().HasMaxLength(512);
         builder.Property(record => record.EventId).IsRequired().HasMaxLength(512);
+        builder.Property(record => record.DedupKey).HasMaxLength(512);
+        builder.Property(record => record.GroupKey).HasMaxLength(512);
         builder.Property(record => record.EventSource).HasMaxLength(2048);
         builder.Property(record => record.Subject).HasMaxLength(2048);
         builder.Property(record => record.DataContentType).HasMaxLength(256);
@@ -26,7 +28,14 @@ public sealed class EventRecordConfiguration : IEntityTypeConfiguration<EventRec
 
         builder.HasIndex(record => new { record.SourceId, record.EventType });
         builder.HasIndex(record => new { record.SourceId, record.ReceivedAtUtc });
-        builder.HasIndex(record => new { record.SourceId, record.EventId }).IsUnique();
+        builder.HasIndex(record => new { record.SourceId, record.EventId });
+        builder.HasIndex(record => new { record.SourceId, record.DedupKey }).IsUnique();
+        builder.HasIndex(record => new
+        {
+            record.SourceId,
+            record.GroupKey,
+            record.ReceivedAtUtc,
+        });
 
         builder
             .HasOne<Source>()

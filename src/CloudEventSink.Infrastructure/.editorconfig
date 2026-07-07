@@ -1,0 +1,10 @@
+[*.cs]
+dotnet_diagnostic.CA2007.severity = none
+
+[Query/*.cs]
+dotnet_diagnostic.CA2100.severity = none
+dotnet_diagnostic.S2077.severity = none
+
+[Projection/*.cs]
+dotnet_diagnostic.CA2100.severity = none
+dotnet_diagnostic.S2077.severity = none
